@@ -9,6 +9,7 @@
 
 #include "mirage/prims/Primitive.h"
 #include "mirage/prims/Mesh.h"
+#include "mirage/prims/PointInstancer.h"
 #include "mirage/camera/Camera.h"
 #include "mirage/shaders/Texture.h"
 #include "mirage/shaders/Material.h"
@@ -63,6 +64,13 @@ namespace Mirage
 		// Primitives
 		std::vector<Primitive> primitives;
 
+		// Procedural point-instancers (Tier-1 "instancing/particles") -
+		// expanded into ordinary `primitives` entries by Build(), see
+		// ExpandInstancers(). Not itself an acceleration-structure input -
+		// by the time Build() constructs the scene BVH, every instance is
+		// already a plain Primitive like any other.
+		std::vector<PointInstancer> instancers;
+
 		// Meshes
 		std::vector<std::unique_ptr<Mesh>> meshes;
 
@@ -83,6 +91,12 @@ namespace Mirage
 		void Clear();
 
 		void AddPrimitive(const Primitive &prim);
+
+		// Registers a PointInstancer - expanded into `primitives` the next
+		// time Build() runs (see ExpandInstancers()). Order relative to
+		// AddPrimitive() calls doesn't matter; expansion always happens
+		// before the scene BVH is built.
+		void AddInstancer(const PointInstancer &instancer);
 
 		// Returns the new mesh's index in `meshes` (-1 if `mesh` was null,
 		// same no-op-on-null behavior as before this return value existed) -
@@ -125,5 +139,13 @@ namespace Mirage
 
 		std::unordered_map<std::string, int> materialNameToIndex;
 		std::unordered_map<std::string, int> texturePathToIndex;
+
+		// Appends one Primitive per instance across every entry in
+		// `instancers` into `primitives`, then clears `instancers` (so a
+		// second Build() call - e.g. after AddPrimitive()'ing more geometry -
+		// doesn't re-expand and duplicate the same instances). Called by
+		// Build() while `mutex` is already held - not itself lock-acquiring,
+		// to avoid re-entrant-locking the same non-recursive std::mutex.
+		void ExpandInstancers();
 	};
 }

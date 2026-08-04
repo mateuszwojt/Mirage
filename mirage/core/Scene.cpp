@@ -1,5 +1,6 @@
 #include "mirage/core/Scene.h"
 #include "mirage/core/Intersection.h"
+#include "mirage/utils/Util.h"
 
 namespace Mirage
 {
@@ -7,6 +8,7 @@ namespace Mirage
     {
         meshes.clear();
         primitives.clear();
+        instancers.clear();
         materials.clear();
         textures.clear();
         materialNameToIndex.clear();
@@ -22,6 +24,12 @@ namespace Mirage
     {
         std::lock_guard<std::mutex> lock(mutex);
         primitives.push_back(prim);
+    }
+
+    void Scene::AddInstancer(const PointInstancer &instancer)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        instancers.push_back(instancer);
     }
 
     int Scene::AddMesh(std::unique_ptr<Mesh> mesh)
@@ -90,10 +98,70 @@ namespace Mirage
         return textures[index].get();
     }
 
+    void Scene::ExpandInstancers()
+    {
+        for (const PointInstancer &instancer : instancers)
+        {
+            // Resolve the shared mesh geometry once per instancer, not once
+            // per instance - every expanded eMesh Primitive below gets an
+            // identical MeshGeometry (same positions/indices/meshIndex),
+            // exactly the "N primitives, one shared mesh" case
+            // VulkanRenderer::UploadScene's meshIndex fast path exists for.
+            MeshGeometry meshGeo{};
+            if (instancer.type == eMesh)
+            {
+                if (instancer.meshIndex < 0 || (size_t)instancer.meshIndex >= meshes.size() || !meshes[instancer.meshIndex])
+                    continue; // invalid mesh reference - skip this instancer entirely, not per-instance
+
+                meshGeo = GeometryFromMesh(meshes[instancer.meshIndex].get());
+                meshGeo.meshIndex = instancer.meshIndex;
+            }
+
+            const bool hasEndTransforms = !instancer.instanceEnd.empty() &&
+                                           instancer.instanceEnd.size() == instancer.instanceStart.size();
+
+            for (size_t i = 0; i < instancer.instanceStart.size(); ++i)
+            {
+                Primitive prim;
+                prim.type = instancer.type;
+                prim.startTransform = instancer.instanceStart[i];
+                prim.endTransform = hasEndTransforms ? instancer.instanceEnd[i] : instancer.instanceStart[i];
+                prim.materialIndex = instancer.materialIndex;
+                prim.lightSamples = instancer.lightSamples;
+                prim.hydraId = instancer.hydraId;
+
+                switch (instancer.type)
+                {
+                case eSphere:
+                    prim.sphere.radius = instancer.sphereRadius;
+                    break;
+                case ePlane:
+                    prim.plane.plane[0] = instancer.plane[0];
+                    prim.plane.plane[1] = instancer.plane[1];
+                    prim.plane.plane[2] = instancer.plane[2];
+                    prim.plane.plane[3] = instancer.plane[3];
+                    break;
+                case eMesh:
+                    prim.mesh = meshGeo;
+                    break;
+                }
+
+                primitives.push_back(prim);
+            }
+        }
+
+        // Instances are now ordinary primitives - clear so a second Build()
+        // call (e.g. after adding more geometry) doesn't re-expand and
+        // duplicate them.
+        instancers.clear();
+    }
+
     void Scene::Build()
     {
         std::lock_guard<std::mutex> lock(mutex);
-        
+
+        ExpandInstancers();
+
         if (primitives.size() == 0)
         {
             // nothing to build the scene from, should yield some error

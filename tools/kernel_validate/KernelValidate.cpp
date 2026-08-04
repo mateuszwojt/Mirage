@@ -866,6 +866,169 @@ namespace
         return pass;
     }
 
+    // M10 (Tier-1 "instancing/particles"): builds one scene combining both
+    // PointInstancer use cases - a shared mesh instanced several times (the
+    // "instancing" case) and a small grid of emissive spheres (the
+    // "particles" case) - then checks three things: (1) Scene::Build()
+    // expanded the instancers into exactly the right number of Primitives,
+    // (2) every expanded mesh Primitive really does share one Mesh/meshIndex
+    // rather than each getting its own copy (the one thing ExpandInstancers()
+    // does that no other code path in this file exercises - every other mesh
+    // test scene is 1:1 mesh<->primitive), and (3) the expanded scene renders
+    // identically on CPU and GPU, reusing RunPathTraceValidation exactly like
+    // every other scene-level check in this file - instancing adds no new
+    // traversal/intersection code, so this is really validating "expansion
+    // produced correct, ordinary Primitives", not a new rendering path.
+    namespace
+    {
+        const int kInstancedQuadCount = 5;
+        const int kInstancedSphereCountX = 3;
+        const int kInstancedSphereCountY = 2;
+
+        void BuildInstancedTestScene(Scene &scene)
+        {
+            // Instancing case: one shared quad mesh, stamped out
+            // kInstancedQuadCount times along X.
+            std::unique_ptr<Mesh> mesh = MakeQuadMesh();
+            int meshIndex = scene.AddMesh(std::move(mesh));
+
+            PointInstancer quadInstancer;
+            quadInstancer.type = eMesh;
+            quadInstancer.meshIndex = meshIndex;
+            {
+                auto mat = std::make_unique<Material>();
+                mat->color = Vec3(0.3f, 0.5f, 0.7f);
+                mat->roughness = 0.5f;
+                quadInstancer.materialIndex = scene.AddMaterial(std::move(mat));
+            }
+            for (int i = 0; i < kInstancedQuadCount; ++i)
+            {
+                float x = -2.0f + float(i); // -2, -1, 0, 1, 2
+                quadInstancer.instanceStart.push_back(Transform(Vec3(x, 0.0f, 0.0f), Quat(), 0.35f));
+            }
+            // instanceEnd left empty - static instances (no per-instance
+            // motion blur exercised here; that's the same Transform
+            // interpolation every other Primitive already uses, not
+            // instancer-specific behavior worth re-testing).
+            scene.AddInstancer(quadInstancer);
+
+            // Particles case: a small grid of small emissive spheres.
+            PointInstancer sphereInstancer;
+            sphereInstancer.type = eSphere;
+            sphereInstancer.sphereRadius = 0.2f;
+            {
+                auto mat = std::make_unique<Material>();
+                mat->color = Vec3(0.0f);
+                mat->emission = Vec3(2.0f, 1.5f, 0.5f);
+                sphereInstancer.materialIndex = scene.AddMaterial(std::move(mat));
+            }
+            sphereInstancer.lightSamples = 1;
+            for (int gx = 0; gx < kInstancedSphereCountX; ++gx)
+                for (int gy = 0; gy < kInstancedSphereCountY; ++gy)
+                    sphereInstancer.instanceStart.push_back(
+                        Transform(Vec3(-0.6f + 0.6f * gx, 1.5f + 0.6f * gy, 0.5f)));
+            scene.AddInstancer(sphereInstancer);
+
+            scene.sky.horizon = Vec3(0.3f, 0.35f, 0.45f);
+            scene.sky.zenith = Vec3(0.05f, 0.1f, 0.25f);
+
+            scene.Build();
+        }
+    }
+
+    bool RunInstancingValidation()
+    {
+        bool pass = true;
+
+        Scene scene;
+        BuildInstancedTestScene(scene);
+
+        const size_t expectedPrimitives = kInstancedQuadCount + (size_t)kInstancedSphereCountX * kInstancedSphereCountY;
+        if (scene.primitives.size() != expectedPrimitives)
+        {
+            pass = false;
+            printf("[M10 Instancing] FAIL: expected %zu expanded primitives, got %zu\n",
+                   expectedPrimitives, scene.primitives.size());
+        }
+
+        // instancers must be consumed (cleared) by Build() - re-Build()'ing
+        // must not re-expand and duplicate the same instances.
+        if (!scene.instancers.empty())
+        {
+            pass = false;
+            printf("[M10 Instancing] FAIL: Scene::instancers not cleared after Build()\n");
+        }
+
+        const Mesh *sharedMesh = nullptr;
+        int meshPrimCount = 0;
+        for (const Primitive &p : scene.primitives)
+        {
+            if (p.type != eMesh)
+                continue;
+            ++meshPrimCount;
+            if (p.mesh.meshIndex < 0)
+            {
+                pass = false;
+                printf("[M10 Instancing] FAIL: expanded mesh primitive has unset meshIndex\n");
+            }
+            const Mesh *thisMesh = (const Mesh *)p.mesh.id;
+            if (!sharedMesh)
+                sharedMesh = thisMesh;
+            else if (thisMesh != sharedMesh)
+            {
+                pass = false;
+                printf("[M10 Instancing] FAIL: expanded mesh primitives don't all share one Mesh\n");
+            }
+        }
+        if (meshPrimCount != kInstancedQuadCount)
+        {
+            pass = false;
+            printf("[M10 Instancing] FAIL: expected %d mesh primitives, got %d\n", kInstancedQuadCount, meshPrimCount);
+        }
+
+        printf("[M10 Instancing] expansion checks %s (%zu primitives, %d sharing one mesh)\n",
+               pass ? "PASS" : "FAIL", scene.primitives.size(), meshPrimCount);
+
+        bool renderPass = RunPathTraceValidation(
+            [](Scene &s) { BuildInstancedTestScene(s); }, 1.e-2f, "instanced");
+        pass = pass && renderPass;
+
+        printf("[M10 Instancing] %s\n", pass ? "PASS" : "FAIL");
+
+        // Visual sanity check for a human reviewer: a fresh scene (Build()
+        // consumed the first one's instancers) rendered CPU-only, wide
+        // enough to show all 5 quad instances and the sphere-particle grid
+        // at once.
+        {
+            Scene visScene;
+            BuildInstancedTestScene(visScene);
+
+            const int width = 240, height = 135;
+            Camera camera;
+            camera.position = Vec3(0.0f, 0.7f, 6.0f);
+            camera.fov = DegToRad(55.0f);
+
+            Options options{};
+            options.mode = ePathTrace;
+            options.width = width;
+            options.height = height;
+            options.maxDepth = 2;
+            options.maxSamples = 16;
+            options.exposure = 1.0f;
+            options.clamp = 20.0f;
+            options.filter = Filter(FilterType::eFilterGaussian, 1.0f, 2.0f);
+
+            std::unique_ptr<Renderer> cpuRenderer(CreateCpuRenderer(&visScene));
+            std::vector<Color> image(width * height, Color(0.0f));
+            cpuRenderer->Render(camera, options, image.data());
+            WritePng("kernel_validate_instancing.png", width, height, image);
+            printf("[M10 Instancing] wrote kernel_validate_instancing.png "
+                   "(5 quad instances sharing one mesh + a 3x2 emissive sphere-particle grid)\n");
+        }
+
+        return pass;
+    }
+
     // M7 validation-only: CPU-only (no GPU/Vulkan involved - that's M8's job)
     // checks for TextureSampling.h's SampleTextureRGB/SampleTextureR against
     // hand-computed bilinear expected values, plus a textured-mesh render
@@ -1407,9 +1570,11 @@ int main()
     bool pathTraceTexturedPass = RunPathTraceValidation(
         [](Scene &s) { BuildTexturedPathTraceTestScene(s); }, 0.01f, "textured-mesh");
     bool motionBlurPass = RunMotionBlurValidation();
+    bool instancingPass = RunInstancingValidation();
 
     bool pass = normalsPass && bsdfPass && pathTracePass && pathTraceProbePass && probePass &&
-                textureArraySpikePass && textureSamplingPass && pathTraceTexturedPass && motionBlurPass;
+                textureArraySpikePass && textureSamplingPass && pathTraceTexturedPass && motionBlurPass &&
+                instancingPass;
     printf("%s\n", pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;
 }
