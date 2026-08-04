@@ -5,6 +5,13 @@ cmake_policy(SET CMP0091 NEW)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# libMirage.a (and slang-rhi's static libs, fetched under mirage/kernels) end up
+# linked into hdMirage.so, a shared object. macOS's toolchain emits
+# position-independent code unconditionally, but on Linux static libs default to
+# non-PIC, which fails the shared-object link with R_X86_64_TPOFF32 relocations
+# against TLS variables. Building everything as PIC from the start avoids that.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 set(LIB_MAJOR_VERSION "1")
 set(LIB_MINOR_VERSION "0")
 set(LIB_PATCH_VERSION "0")
