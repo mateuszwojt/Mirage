@@ -24,13 +24,14 @@ namespace Mirage
         primitives.push_back(prim);
     }
 
-    void Scene::AddMesh(std::unique_ptr<Mesh> mesh)
+    int Scene::AddMesh(std::unique_ptr<Mesh> mesh)
     {
-        if (mesh)
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            meshes.push_back(std::move(mesh));
-        }
+        if (!mesh)
+            return -1;
+
+        std::lock_guard<std::mutex> lock(mutex);
+        meshes.push_back(std::move(mesh));
+        return (int)meshes.size() - 1;
     }
 
     int Scene::AddMaterial(std::unique_ptr<Material> mat)

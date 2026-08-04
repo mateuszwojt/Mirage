@@ -42,8 +42,10 @@ GpuTransform GpuTransform_Interpolate(GpuTransform a, GpuTransform b, float t)
 }
 
 // Mirrors IntersectRayMesh / MeshQuery: BVH traversal over the mesh-local node
-// range (nodeOffset..nodeOffset+numNodes), closest-hit triangle test.
-bool IntersectRayMesh(GpuMeshDescriptor desc, float3 origin, float3 dir, float tmax,
+// range (nodeOffset..nodeOffset+numNodes), closest-hit triangle test. rayTime
+// drives the deforming-motion-blur vertex lerp below when desc.hasMotion != 0
+// (mirrors MeshQuery::operator()'s mesh.positionsEnd branch on the CPU side).
+bool IntersectRayMesh(GpuMeshDescriptor desc, float3 origin, float3 dir, float tmax, float rayTime,
                        out float outT, out float outU, out float outV, out float outW,
                        out int outTri, out float3 outNormal)
 {
@@ -73,6 +75,13 @@ bool IntersectRayMesh(GpuMeshDescriptor desc, float3 origin, float3 dir, float t
             float3 a = g_Positions[desc.vertexOffset + i0];
             float3 b = g_Positions[desc.vertexOffset + i1];
             float3 c = g_Positions[desc.vertexOffset + i2];
+
+            if (desc.hasMotion != 0)
+            {
+                a = lerp(a, g_PositionsEnd[desc.vertexOffsetEnd + i0], rayTime);
+                b = lerp(b, g_PositionsEnd[desc.vertexOffsetEnd + i1], rayTime);
+                c = lerp(c, g_PositionsEnd[desc.vertexOffsetEnd + i2], rayTime);
+            }
 
             float t, u, v, w, sign;
             float3 n;
@@ -165,7 +174,7 @@ bool PrimitiveIntersect(GpuPrimitive prim, float3 rayOrigin, float3 rayDir, floa
         float t, u, v, w;
         int tri;
         float3 triNormal;
-        bool hit = IntersectRayMesh(desc, localOrigin, localDir, 3.402823466e+38f, t, u, v, w, tri, triNormal);
+        bool hit = IntersectRayMesh(desc, localOrigin, localDir, 3.402823466e+38f, rayTime, t, u, v, w, tri, triNormal);
         if (hit)
         {
             int i0 = g_Indices[desc.indexOffset + tri * 3 + 0];

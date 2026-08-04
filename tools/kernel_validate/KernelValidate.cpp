@@ -134,7 +134,7 @@ namespace
         meshPrim.startTransform = Transform(meshPos, Quat(), objRadius);
         meshPrim.endTransform = meshPrim.startTransform;
         meshPrim.mesh = GeometryFromMesh(mesh.get());
-        scene.AddMesh(std::move(mesh));
+        meshPrim.mesh.meshIndex = scene.AddMesh(std::move(mesh));
         scene.AddPrimitive(meshPrim);
 
         scene.Build();
@@ -489,7 +489,7 @@ namespace
             meshMat->roughness = 0.6f;
             meshPrim.materialIndex = scene.AddMaterial(std::move(meshMat));
         }
-        scene.AddMesh(std::move(mesh));
+        meshPrim.mesh.meshIndex = scene.AddMesh(std::move(mesh));
         scene.AddPrimitive(meshPrim);
 
         Primitive lightPrim;
@@ -696,6 +696,174 @@ namespace
         printf("[M3 PathTrace smoke test] %d samples accumulated, avg luminance sum=%f, non-black pixels=%d/%d "
                "(image written to kernel_validate_pathtrace.png for visual inspection)\n",
                samples, sum / (width * height), nonBlack, width * height);
+    }
+
+    // M9 (Tier-1 "deforming/skinned-mesh motion blur"): builds a single
+    // deforming quad mesh - vertices/verticesEnd differ by a known local-space
+    // translation, so the quad's world-space center sweeps from x=0 (time=0)
+    // to x=kDeformDeltaX (time=1) - then fires an explicit ray at a fixed
+    // world-space X coordinate the swept quad only crosses for a sub-range of
+    // the shutter. Unlike RunPathTraceValidation's grid generator (which
+    // always uses time=1.0, see GeneratePathTraceTestCase), this varies
+    // `time` directly, so it's the one test in this file that actually
+    // exercises the mid-shutter vertex lerp itself (Intersection.h's
+    // MeshQuery / geometry/Primitive.slang's IntersectRayMesh), not just the
+    // verticesEnd endpoint. Comparing against an analytically-known hit/miss
+    // pattern (not just CPU-vs-GPU mutual agreement) also catches a bug that
+    // happens to be reproduced identically on both backends.
+    namespace
+    {
+        const float kDeformDeltaX = 3.0f;
+        const float kQuadHalfWidth = 0.7f; // MakeQuadMesh()'s own vertex extent
+        const float kRayX = 1.5f;          // crosses the swept quad only for t in ~[0.27, 0.73]
+
+        std::unique_ptr<Mesh> MakeDeformingQuadMesh()
+        {
+            std::unique_ptr<Mesh> mesh = MakeQuadMesh();
+            mesh->verticesEnd = mesh->vertices;
+            for (auto &v : mesh->verticesEnd)
+                v.x += kDeformDeltaX;
+            mesh->rebuildBVH(); // rebuild with the swept per-triangle bounds now that verticesEnd is set
+            return mesh;
+        }
+
+        void BuildDeformingMeshTestScene(Scene &scene)
+        {
+            std::unique_ptr<Mesh> mesh = MakeDeformingQuadMesh();
+
+            Primitive meshPrim;
+            meshPrim.type = eMesh;
+            meshPrim.startTransform = Transform(Vec3(0.0f, 0.0f, 0.0f));
+            meshPrim.endTransform = meshPrim.startTransform;
+            meshPrim.mesh = GeometryFromMesh(mesh.get());
+            {
+                // Strong, distinctive emission and no other light/sky in the
+                // scene, so "hit the quad" vs "hit nothing" is an unambiguous
+                // radiance threshold, not a subtle color comparison.
+                auto mat = std::make_unique<Material>();
+                mat->color = Vec3(0.0f);
+                mat->emission = Vec3(5.0f, 1.0f, 1.0f);
+                meshPrim.materialIndex = scene.AddMaterial(std::move(mat));
+            }
+            meshPrim.mesh.meshIndex = scene.AddMesh(std::move(mesh));
+            scene.AddPrimitive(meshPrim);
+
+            scene.Build();
+        }
+
+        // Analytic ground truth: quad center at time t is (kDeformDeltaX * t,
+        // 0, 0) with half-width kQuadHalfWidth (primitive transform is
+        // identity, so local and world space coincide).
+        bool ExpectHitAtTime(float t)
+        {
+            float centerX = kDeformDeltaX * t;
+            return fabsf(kRayX - centerX) <= kQuadHalfWidth;
+        }
+    }
+
+    bool RunMotionBlurValidation()
+    {
+        Scene scene;
+        BuildDeformingMeshTestScene(scene);
+        uint32_t numPrimitives = (uint32_t)scene.primitives.size();
+
+        const int kNumTimeSamples = 21; // t = 0.00, 0.05, ..., 1.00
+        const Vec3 origin(kRayX, 0.0f, 6.0f);
+        const Vec3 dir(0.0f, 0.0f, -1.0f);
+
+        std::vector<GpuPathTraceTestCase> gpuCases;
+        gpuCases.reserve(kNumTimeSamples);
+        for (int i = 0; i < kNumTimeSamples; ++i)
+        {
+            float t = float(i) / float(kNumTimeSamples - 1);
+
+            GpuPathTraceTestCase gc{};
+            gc.originX = origin.x; gc.originY = origin.y; gc.originZ = origin.z;
+            gc.dirX = dir.x; gc.dirY = dir.y; gc.dirZ = dir.z;
+            gc.time = t;
+            gc.maxDepth = 1;
+            gc.seed = (uint32_t)(i * 2246822519u + 1u);
+            gc.numPrimitives = numPrimitives;
+            gpuCases.push_back(gc);
+        }
+
+        std::vector<GpuPathTraceTestResult> gpuResults(kNumTimeSamples);
+        {
+            std::unique_ptr<VulkanRenderer> gpuRenderer(static_cast<VulkanRenderer *>(CreateVulkanRenderer(&scene)));
+            if (!gpuRenderer->IsAvailable())
+            {
+                fprintf(stderr, "[M9 Motion blur] FAIL: VulkanRenderer not available\n");
+                return false;
+            }
+            gpuRenderer->RunPathTraceTest(gpuCases.data(), gpuResults.data(), kNumTimeSamples);
+        }
+
+        bool pass = true;
+        for (int i = 0; i < kNumTimeSamples; ++i)
+        {
+            float t = float(i) / float(kNumTimeSamples - 1);
+            const GpuPathTraceTestCase &gc = gpuCases[i];
+            const GpuPathTraceTestResult &gr = gpuResults[i];
+
+            Random rand(gc.seed);
+            Vec3 cpuRadiance = PathTrace(scene, origin, dir, t, gc.maxDepth, rand);
+            Vec3 gpuRadiance(gr.radianceX, gr.radianceY, gr.radianceZ);
+
+            bool expectHit = ExpectHitAtTime(t);
+            bool cpuHit = cpuRadiance.x > 2.5f; // emission.x=5.0 on hit, 0 on miss/background
+            bool gpuHit = gpuRadiance.x > 2.5f;
+            bool agree = Length(cpuRadiance - gpuRadiance) < 0.05f;
+
+            if (cpuHit != expectHit || gpuHit != expectHit || !agree)
+            {
+                pass = false;
+                printf("[M9 Motion blur] FAIL t=%.3f expectHit=%d cpuHit=%d gpuHit=%d "
+                       "cpu=(%.3f,%.3f,%.3f) gpu=(%.3f,%.3f,%.3f)\n",
+                       t, expectHit, cpuHit, gpuHit,
+                       cpuRadiance.x, cpuRadiance.y, cpuRadiance.z,
+                       gpuRadiance.x, gpuRadiance.y, gpuRadiance.z);
+            }
+        }
+
+        printf("[M9 Motion blur] deforming-mesh %s\n", pass ? "PASS" : "FAIL");
+
+        // Visual sanity check for a human reviewer, supplementary to the
+        // analytic pass/fail above: two CPU-only renders of the same scene
+        // with the shutter pinned to a single instant each (shutterStart ==
+        // shutterEnd, so every accumulated sample sees the same time - no
+        // inter-sample blending), showing the quad at its start-of-shutter
+        // and end-of-shutter positions.
+        {
+            const int width = 160, height = 90;
+            Camera camera;
+            camera.position = Vec3(kDeformDeltaX * 0.5f, 0.0f, 8.0f);
+            camera.fov = DegToRad(55.0f);
+
+            Options options{};
+            options.mode = ePathTrace;
+            options.width = width;
+            options.height = height;
+            options.maxDepth = 1;
+            options.maxSamples = 1;
+            options.exposure = 1.0f;
+            options.clamp = 20.0f;
+
+            std::unique_ptr<Renderer> cpuRenderer(CreateCpuRenderer(&scene));
+            for (float t : {0.0f, 1.0f})
+            {
+                camera.shutterStart = t;
+                camera.shutterEnd = t;
+                std::vector<Color> image(width * height, Color(0.0f));
+                cpuRenderer->Render(camera, options, image.data());
+                char path[64];
+                snprintf(path, sizeof(path), "kernel_validate_motion_blur_t%d.png", (int)t);
+                WritePng(path, width, height, image);
+            }
+            printf("[M9 Motion blur] wrote kernel_validate_motion_blur_t0.png / _t1.png "
+                   "(quad should visibly shift right between the two)\n");
+        }
+
+        return pass;
     }
 
     // M7 validation-only: CPU-only (no GPU/Vulkan involved - that's M8's job)
@@ -924,7 +1092,7 @@ namespace
                 mat->albedoTextureIndex = texIndex;
                 quadPrim.materialIndex = scene.AddMaterial(std::move(mat));
             }
-            scene.AddMesh(std::move(mesh));
+            quadPrim.mesh.meshIndex = scene.AddMesh(std::move(mesh));
             scene.AddPrimitive(quadPrim);
 
             Primitive lightPrim;
@@ -1042,7 +1210,7 @@ namespace
             meshMat->albedoTextureIndex = texIndex;
             meshPrim.materialIndex = scene.AddMaterial(std::move(meshMat));
         }
-        scene.AddMesh(std::move(mesh));
+        meshPrim.mesh.meshIndex = scene.AddMesh(std::move(mesh));
         scene.AddPrimitive(meshPrim);
 
         Primitive lightPrim;
@@ -1238,9 +1406,10 @@ int main()
     // scene introduces relative to the already-tight analytic-sky case.
     bool pathTraceTexturedPass = RunPathTraceValidation(
         [](Scene &s) { BuildTexturedPathTraceTestScene(s); }, 0.01f, "textured-mesh");
+    bool motionBlurPass = RunMotionBlurValidation();
 
     bool pass = normalsPass && bsdfPass && pathTracePass && pathTraceProbePass && probePass &&
-                textureArraySpikePass && textureSamplingPass && pathTraceTexturedPass;
+                textureArraySpikePass && textureSamplingPass && pathTraceTexturedPass && motionBlurPass;
     printf("%s\n", pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;
 }

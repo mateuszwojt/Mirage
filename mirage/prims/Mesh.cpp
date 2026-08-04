@@ -61,6 +61,7 @@ namespace Mirage
         if (numTris)
         {
             std::vector<Bounds> triangleBounds(numTris);
+            const bool hasMotion = HasMotion();
 
             for (int i = 0; i < numTris; ++i)
             {
@@ -71,6 +72,21 @@ namespace Mirage
                 triangleBounds[i].AddPoint(a);
                 triangleBounds[i].AddPoint(b);
                 triangleBounds[i].AddPoint(c);
+
+                // Deforming motion blur: conservatively union in the
+                // end-of-shutter triangle position too, so the BVH leaf this
+                // triangle lands in bounds its whole swept volume across the
+                // shutter - the same two-keyframe trick PrimitiveBounds()
+                // (core/Intersection.h) already uses one level up for rigid
+                // whole-object blur, applied per-triangle instead. Without
+                // this, a mid-shutter ray could miss a triangle whose swept
+                // position moved outside its static-only bounds.
+                if (hasMotion)
+                {
+                    triangleBounds[i].AddPoint(verticesEnd[indices[i * 3 + 0]]);
+                    triangleBounds[i].AddPoint(verticesEnd[indices[i * 3 + 1]]);
+                    triangleBounds[i].AddPoint(verticesEnd[indices[i * 3 + 2]]);
+                }
             }
 
             BVHBuilder builder;
@@ -132,6 +148,13 @@ namespace Mirage
             vertices[i] = TransformPoint(m, vertices[i]);
             normals[i] = TransformVector(m, normals[i]);
         }
+
+        // Keep the end-of-shutter keyframe (if any) baked consistently with
+        // the start keyframe above, so HasMotion()'s "same size as vertices"
+        // invariant still holds and the two keyframes don't desync after a
+        // bake (e.g. via Normalize()).
+        for (size_t i = 0; i < verticesEnd.size(); ++i)
+            verticesEnd[i] = TransformPoint(m, verticesEnd[i]);
     }
 
     void Mesh::GetBounds(Vec3 &outMinExtents, Vec3 &outMaxExtents) const
