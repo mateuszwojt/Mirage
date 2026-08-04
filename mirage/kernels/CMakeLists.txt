@@ -25,8 +25,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     else()
         message(FATAL_ERROR "Mirage's Slang/Vulkan kernel path does not yet have a pinned Slang distribution for macOS ${CMAKE_SYSTEM_PROCESSOR}")
     endif()
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+        set(MIRAGE_SLANG_DIST_URL "https://github.com/shader-slang/slang/releases/download/v${MIRAGE_SLANG_VERSION}/slang-${MIRAGE_SLANG_VERSION}-linux-aarch64.tar.gz")
+        set(MIRAGE_SLANG_DIST_HASH "SHA256=7acbfe80260009263346f72efaadabfa7666248a045e720b573ba78fb008ac42")
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+        set(MIRAGE_SLANG_DIST_URL "https://github.com/shader-slang/slang/releases/download/v${MIRAGE_SLANG_VERSION}/slang-${MIRAGE_SLANG_VERSION}-linux-x86_64.tar.gz")
+        set(MIRAGE_SLANG_DIST_HASH "SHA256=9445cf0b35332bfda055c9424e307f957ff58befb04c5b45b9f9f29894a41cf8")
+    else()
+        message(FATAL_ERROR "Mirage's Slang/Vulkan kernel path does not yet have a pinned Slang distribution for Linux ${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
 else()
-    message(FATAL_ERROR "Mirage's Slang/Vulkan kernel path is currently only wired up for macOS (MoltenVK); ${CMAKE_SYSTEM_NAME} is not yet supported here")
+    message(FATAL_ERROR "Mirage's Slang/Vulkan kernel path is currently only wired up for macOS (MoltenVK) and Linux (native Vulkan); ${CMAKE_SYSTEM_NAME} is not yet supported here")
 endif()
 
 FetchContent_Declare(
@@ -50,6 +60,11 @@ set(SLANG_RHI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(SLANG_RHI_BUILD_TESTS_WITH_GLFW OFF CACHE BOOL "" FORCE)
 set(SLANG_RHI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(SLANG_RHI_INSTALL OFF CACHE BOOL "" FORCE)
+# CUDA/OptiX default ON on Linux/Windows, but VulkanRenderer never requests
+# them (CUDA support was removed from Mirage entirely - see mirage/CMakeLists.txt)
+# and CI/dev machines building the Vulkan path have no CUDA toolkit installed.
+set(SLANG_RHI_ENABLE_CUDA OFF CACHE BOOL "" FORCE)
+set(SLANG_RHI_ENABLE_OPTIX OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(
     slang_rhi
@@ -248,7 +263,9 @@ install(FILES
     DESTINATION "${CMAKE_INSTALL_LIBDIR}"
 )
 
-file(GLOB MIRAGE_SLANG_RUNTIME_DYLIBS "${mirage_slang_dist_SOURCE_DIR}/lib/*.dylib")
+# *.dylib on Darwin, *.so[.<version>] on Linux (slang's Linux dist ships
+# versioned sonames, e.g. libgfx.so.0.2026.14, alongside the unversioned name).
+file(GLOB MIRAGE_SLANG_RUNTIME_DYLIBS "${mirage_slang_dist_SOURCE_DIR}/lib/*.dylib" "${mirage_slang_dist_SOURCE_DIR}/lib/*.so*")
 install(FILES ${MIRAGE_SLANG_RUNTIME_DYLIBS} DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 
 # Best-effort only: slang-rhi's WGPU/Dawn backend is never used by Mirage (the
@@ -256,6 +273,10 @@ install(FILES ${MIRAGE_SLANG_RUNTIME_DYLIBS} DESTINATION "${CMAKE_INSTALL_LIBDIR
 # link-time dependency of slang-rhi (its CMake only wires it in via a runtime
 # copy-next-to-the-binary step - see slang-rhi's own CMakeLists.txt). Installed
 # defensively in case some future slang-rhi init path probes for it eagerly.
-if(DEFINED dawn_SOURCE_DIR AND EXISTS "${dawn_SOURCE_DIR}/lib/libdawn.dylib")
-    install(FILES "${dawn_SOURCE_DIR}/lib/libdawn.dylib" DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+if(DEFINED dawn_SOURCE_DIR)
+    if(EXISTS "${dawn_SOURCE_DIR}/lib/libdawn.dylib")
+        install(FILES "${dawn_SOURCE_DIR}/lib/libdawn.dylib" DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+    elseif(EXISTS "${dawn_SOURCE_DIR}/lib/libdawn.so")
+        install(FILES "${dawn_SOURCE_DIR}/lib/libdawn.so" DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+    endif()
 endif()

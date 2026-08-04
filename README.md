@@ -17,9 +17,9 @@ compatibility" below).
   ported to [Slang](https://github.com/shader-slang/slang), compiled to
   SPIR-V at build time and run through
   [slang-rhi](https://github.com/shader-slang/slang-rhi)'s Vulkan backend
-  (MoltenVK on macOS). This is currently the only GPU path — **CUDA support
-  has been removed**, and the Vulkan/Slang kernel path is currently only
-  wired up for macOS on Apple Silicon (arm64).
+  (native Vulkan on Linux, MoltenVK on macOS). This is currently the only GPU
+  path — **CUDA support has been removed**. The Vulkan/Slang kernel path is
+  wired up for macOS (Apple Silicon) and Linux (x86_64 and aarch64).
 - `CreateNullRenderer` — no-op renderer, useful as a placeholder/for testing.
 
 Both the CPU and Vulkan backends support three render modes (`RenderMode`:
@@ -70,11 +70,16 @@ against the installed `Mirage::Mirage` CMake target.
 ## Requirements
 
 - CMake ≥ 3.20, C++17
-- macOS on Apple Silicon (arm64) — currently the only supported platform,
-  since the Vulkan/Slang kernel path only ships a pinned Slang toolchain for
-  macOS arm64 and targets Vulkan via MoltenVK
-- Vulkan SDK / MoltenVK — required (not optional); `find_package(Vulkan
+- macOS (Apple Silicon) or Linux (x86_64 or aarch64) — the Vulkan/Slang
+  kernel path ships pinned Slang toolchains for these platforms only; other
+  platforms hit a `FATAL_ERROR` at configure time (see
+  `mirage/kernels/CMakeLists.txt`)
+- Vulkan loader + headers — required (not optional); `find_package(Vulkan
   REQUIRED)` fails the configure step if it isn't found
+  - macOS: `brew install vulkan-headers vulkan-loader molten-vk`
+  - Linux: a Vulkan loader/headers package (e.g. Debian/Ubuntu's
+    `libvulkan-dev`), plus `libx11-dev`/`libxrandr-dev` since
+    `vulkan.h` pulls in `VK_USE_PLATFORM_XLIB_KHR` on Linux
 - OpenMP (optional) — enables multithreaded CPU rendering
 - No manual Slang install needed: the Slang compiler/runtime and
   [slang-rhi](https://github.com/shader-slang/slang-rhi) are fetched and

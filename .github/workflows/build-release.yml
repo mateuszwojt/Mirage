@@ -1,0 +1,105 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            os: macos-14
+          - platform: linux-x86_64
+            os: ubuntu-24.04
+          - platform: linux-aarch64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # libx11-dev/libxrandr-dev: Vulkan-Headers' vulkan.h pulls in
+          # VK_USE_PLATFORM_XLIB_KHR on Linux, which needs Xlib.h to compile.
+          # mesa-vulkan-drivers: software (lavapipe) Vulkan ICD so the kernel
+          # smoke test below has a device to run against on GPU-less runners.
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build libvulkan-dev libx11-dev libxrandr-dev mesa-vulkan-drivers
+
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install ninja vulkan-headers vulkan-loader molten-vk
+
+      # Speeds up rebuilds: the Slang distribution download, slang-rhi
+      # checkout, and Dawn/Vulkan-Headers fetches are all pinned by version in
+      # mirage/kernels/CMakeLists.txt, so a hash of that file is a valid cache
+      # key - it only changes when a pin changes.
+      - name: Cache FetchContent dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: fetchcontent-${{ matrix.platform }}-${{ hashFiles('mirage/kernels/CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      # kernel_validate compares the CPU reference path tracer against the
+      # Vulkan/Slang kernels. Informational only here: GitHub-hosted runners
+      # have no real GPU, so the software Vulkan ICD (lavapipe on Linux) can
+      # diverge numerically from the reference in ways real hardware doesn't -
+      # this catches build/link/crash regressions, not shading correctness.
+      - name: Run kernel_validate (informational)
+        run: ./build/tools/kernel_validate/kernel_validate || true
+
+      - name: Install
+        run: |
+          cmake --install build --prefix install-stage
+          cp build/tools/kernel_validate/kernel_validate install-stage/bin/
+
+      - name: Package
+        shell: bash
+        run: |
+          version="${GITHUB_REF_TYPE:-}"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="$(git rev-parse --short HEAD)"
+          fi
+          archive="mirage-${version}-${{ matrix.platform }}.tar.gz"
+          tar -C install-stage -czf "$archive" .
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mirage-${{ matrix.platform }}
+          path: ${{ env.ARCHIVE }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

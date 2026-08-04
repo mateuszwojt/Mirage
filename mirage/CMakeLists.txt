@@ -1,8 +1,8 @@
 # Find OpenMP
 find_package(OpenMP)
 
-# Vulkan/MoltenVK is the only GPU-capable render path (CUDA has been removed -
-# it was never wired into this build and doesn't run on macOS anyway).
+# Vulkan (native on Linux, via MoltenVK on macOS) is the only GPU-capable
+# render path (CUDA has been removed - it was never wired into this build).
 find_package(Vulkan REQUIRED)
 
 add_subdirectory(kernels)

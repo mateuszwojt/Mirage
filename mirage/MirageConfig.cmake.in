@@ -16,7 +16,7 @@ if(NOT TARGET Mirage::slang-rhi-bundled)
     set(_mirage_slang_rhi_link_libs
         "${PACKAGE_PREFIX_DIR}/lib/libslang-rhi-resources.a"
         "${PACKAGE_PREFIX_DIR}/lib/libslang-rhi-vma.a"
-        "${PACKAGE_PREFIX_DIR}/lib/libslang.dylib"
+        "${PACKAGE_PREFIX_DIR}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}slang${CMAKE_SHARED_LIBRARY_SUFFIX}"
     )
     if(APPLE)
         # slang-rhi's Metal backend (built by default alongside Vulkan on
