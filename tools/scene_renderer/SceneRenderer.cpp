@@ -27,6 +27,19 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+// tinyexr for 32-bit float EXR output. Vendored as tinyexr.h plus its two
+// small companion headers (exr_reader.hh, streamreader.hh - both
+// self-contained, standard-library-only) from upstream syoyo/tinyexr.
+// Reuse the zlib decode/compress implementations already compiled into
+// stb_image.h (mirage/thirdparty, STB_IMAGE_IMPLEMENTATION defined in
+// TextureLoader.cpp, linked in via the Mirage library) and
+// stb_image_write.h (implementation just above) instead of pulling in
+// miniz as a separate dependency.
+#define TINYEXR_USE_MINIZ 0
+#define TINYEXR_USE_STB_ZLIB 1
+#define TINYEXR_IMPLEMENTATION
+#include "tinyexr.h"
+
 using namespace Mirage;
 
 // Forward declarations
@@ -559,6 +572,39 @@ private:
     std::string baseDir;
 };
 
+// Writes the raw (untonemapped, unquantized) float32 RGBA render buffer to
+// an OpenEXR file. Unlike the LDR writers in main() below, this preserves
+// the renderer's full dynamic range - Color is already float32 RGBA
+// (mirage/math/Color.h), so no conversion beyond a component split is
+// needed.
+bool WriteExr(const std::string &path, const Color *pixels, int width, int height)
+{
+    // outputImage[i].w today holds the CPU splat buffer's accumulated filter
+    // weight (see CpuRenderer::AddSample in mirage/core/Renderer.cpp), not
+    // real alpha/coverage, and the GPU path's resolved .w is the raw
+    // accumulated sample weight too - neither is a [0,1] coverage value, so
+    // write a fully-opaque alpha channel instead of passing it through.
+    std::vector<float> rgba(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
+    for (int i = 0; i < width * height; ++i)
+    {
+        rgba[i * 4 + 0] = pixels[i].x;
+        rgba[i * 4 + 1] = pixels[i].y;
+        rgba[i * 4 + 2] = pixels[i].z;
+        rgba[i * 4 + 3] = 1.0f;
+    }
+
+    const char *err = nullptr;
+    int ret = SaveEXR(rgba.data(), width, height, 4, /*save_as_fp16=*/0, path.c_str(), &err);
+    if (ret != TINYEXR_SUCCESS)
+    {
+        std::cerr << "Failed to save EXR: " << (err ? err : "unknown error") << std::endl;
+        if (err)
+            FreeEXRErrorMessage(err);
+        return false;
+    }
+    return true;
+}
+
 // Main function
 int main(int argc, char *argv[])
 {
@@ -667,52 +713,66 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // Convert the rendered image to 8-bit RGB for saving
-    std::cout << "Debug: Converting image for saving" << std::endl;
-    std::vector<unsigned char> imageData(width * height * 3);
-
-    for (int i = 0; i < width * height; i++)
-    {
-        // Apply tone mapping and convert to sRGB
-        Color pixel = ToneMap(outputImage[i], options.exposure);
-
-        // Convert to 8-bit RGB
-        int r = int(255.0f * Clamp(pixel.x, 0.0f, 1.0f));
-        int g = int(255.0f * Clamp(pixel.y, 0.0f, 1.0f));
-        int b = int(255.0f * Clamp(pixel.z, 0.0f, 1.0f));
-
-        // Store in the output buffer (RGB format)
-        imageData[i * 3 + 0] = (unsigned char)r;
-        imageData[i * 3 + 1] = (unsigned char)g;
-        imageData[i * 3 + 2] = (unsigned char)b;
-    }
-
     // Save the image
     std::cout << "Debug: Saving image" << std::endl;
     std::string extension = outputFile.substr(outputFile.find_last_of(".") + 1);
     bool success = false;
 
-    if (extension == "png")
+    if (extension == "exr")
     {
-        success = stbi_write_png(outputFile.c_str(), width, height, 3, imageData.data(), width * 3) != 0;
-    }
-    else if (extension == "jpg" || extension == "jpeg")
-    {
-        success = stbi_write_jpg(outputFile.c_str(), width, height, 3, imageData.data(), 95) != 0;
-    }
-    else if (extension == "bmp")
-    {
-        success = stbi_write_bmp(outputFile.c_str(), width, height, 3, imageData.data()) != 0;
-    }
-    else if (extension == "tga")
-    {
-        success = stbi_write_tga(outputFile.c_str(), width, height, 3, imageData.data()) != 0;
+        // Full float32, untonemapped output - skip the 8-bit LDR conversion
+        // below entirely, tonemapping/quantization are LDR-only concerns.
+        std::cout << "Debug: Writing float EXR output" << std::endl;
+        success = WriteExr(outputFile, outputImage.data(), width, height);
     }
     else
     {
-        // Default to PNG if extension is not recognized
-        outputFile += ".png";
-        success = stbi_write_png(outputFile.c_str(), width, height, 3, imageData.data(), width * 3) != 0;
+        // Convert the rendered image to 8-bit RGB for saving
+        std::cout << "Debug: Converting image for saving" << std::endl;
+        std::vector<unsigned char> imageData(width * height * 3);
+
+        for (int i = 0; i < width * height; i++)
+        {
+            // Apply tone mapping and convert to sRGB
+            Color pixel = ToneMap(outputImage[i], options.exposure);
+
+            // Convert to 8-bit RGB
+            int r = int(255.0f * Clamp(pixel.x, 0.0f, 1.0f));
+            int g = int(255.0f * Clamp(pixel.y, 0.0f, 1.0f));
+            int b = int(255.0f * Clamp(pixel.z, 0.0f, 1.0f));
+
+            // Store in the output buffer (RGB format)
+            imageData[i * 3 + 0] = (unsigned char)r;
+            imageData[i * 3 + 1] = (unsigned char)g;
+            imageData[i * 3 + 2] = (unsigned char)b;
+        }
+
+        if (extension == "png")
+        {
+            success = stbi_write_png(outputFile.c_str(), width, height, 3, imageData.data(), width * 3) != 0;
+        }
+        else if (extension == "jpg" || extension == "jpeg")
+        {
+            success = stbi_write_jpg(outputFile.c_str(), width, height, 3, imageData.data(), 95) != 0;
+        }
+        else if (extension == "bmp")
+        {
+            success = stbi_write_bmp(outputFile.c_str(), width, height, 3, imageData.data()) != 0;
+        }
+        else if (extension == "tga")
+        {
+            success = stbi_write_tga(outputFile.c_str(), width, height, 3, imageData.data()) != 0;
+        }
+        else
+        {
+            // Unrecognized extension: replace it with .png rather than
+            // appending, so e.g. "out.foo" becomes "out.png", not
+            // "out.foo.png".
+            std::cerr << "Warning: unrecognized output extension '" << extension << "', defaulting to PNG" << std::endl;
+            size_t dotPos = outputFile.find_last_of(".");
+            outputFile = (dotPos != std::string::npos) ? outputFile.substr(0, dotPos) + ".png" : outputFile + ".png";
+            success = stbi_write_png(outputFile.c_str(), width, height, 3, imageData.data(), width * 3) != 0;
+        }
     }
 
     if (success)
