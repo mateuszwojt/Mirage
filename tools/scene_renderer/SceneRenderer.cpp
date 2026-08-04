@@ -111,13 +111,20 @@ public:
         emission = Vec3(r, g, b);
     }
 
+    void setOpacity(float value)
+    {
+        opacity = value;
+    }
+
     void setAlbedoMapPath(const std::string &path) { albedoMapPath = path; }
     void setRoughnessMapPath(const std::string &path) { roughnessMapPath = path; }
     void setMetallicMapPath(const std::string &path) { metallicMapPath = path; }
+    void setOpacityMapPath(const std::string &path) { opacityMapPath = path; }
 
     const std::string &getAlbedoMapPath() const { return albedoMapPath; }
     const std::string &getRoughnessMapPath() const { return roughnessMapPath; }
     const std::string &getMetallicMapPath() const { return metallicMapPath; }
+    const std::string &getOpacityMapPath() const { return opacityMapPath; }
 
     // Texture loading/registration is deliberately not done here - it needs a
     // Scene& (for FindOrAddTexture's dedup) that this class doesn't have, and
@@ -145,6 +152,9 @@ public:
         mat.emission = emission;
         std::cout << "Debug: Setting emission: (" << mat.emission.x << ", " << mat.emission.y << ", " << mat.emission.z << ")" << std::endl;
 
+        mat.opacity = opacity;
+        std::cout << "Debug: Setting opacity: " << mat.opacity << std::endl;
+
         return mat;
     }
 
@@ -154,9 +164,11 @@ private:
     float metallic = 0.0f;
     float specular = 0.5f;
     Vec3 emission = Vec3(0.0f);
+    float opacity = 1.0f;
     std::string albedoMapPath;
     std::string roughnessMapPath;
     std::string metallicMapPath;
+    std::string opacityMapPath;
 };
 
 // Primitive definition class
@@ -263,6 +275,9 @@ public:
             mat.albedoTextureIndex = resolveAndLoad(it->second.getAlbedoMapPath(), TextureColorSpace::eSRGB);
             mat.roughnessTextureIndex = resolveAndLoad(it->second.getRoughnessMapPath(), TextureColorSpace::eLinear);
             mat.metallicTextureIndex = resolveAndLoad(it->second.getMetallicMapPath(), TextureColorSpace::eLinear);
+            // Linear, not sRGB - opacityMap's alpha channel is a coverage
+            // mask, not a color, same reasoning as roughness/metallic above.
+            mat.opacityTextureIndex = resolveAndLoad(it->second.getOpacityMapPath(), TextureColorSpace::eLinear);
         }
         else {
             std::cout << "Debug: Material not found, using default" << std::endl;
@@ -489,6 +504,11 @@ private:
                 std::cout << "Debug: Setting emission: (" << r << ", " << g << ", " << b << ")" << std::endl;
                 materials[materialName].setEmission(r, g, b);
             }
+            else if (property == "opacity" && parts.size() >= 2) {
+                float value = std::stof(parts[1]);
+                std::cout << "Debug: Setting opacity: " << value << std::endl;
+                materials[materialName].setOpacity(value);
+            }
             // Paths with spaces aren't supported - this parser's tokenizer
             // (split()) splits on any space, same pre-existing limitation as
             // every other multi-token property above.
@@ -503,6 +523,10 @@ private:
             else if (property == "metallicMap" && parts.size() >= 2) {
                 std::cout << "Debug: Setting metallicMap: " << parts[1] << std::endl;
                 materials[materialName].setMetallicMapPath(parts[1]);
+            }
+            else if (property == "opacityMap" && parts.size() >= 2) {
+                std::cout << "Debug: Setting opacityMap: " << parts[1] << std::endl;
+                materials[materialName].setOpacityMapPath(parts[1]);
             }
         }
         catch (const std::exception& e) {

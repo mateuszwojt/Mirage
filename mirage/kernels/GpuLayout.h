@@ -111,10 +111,10 @@ namespace Mirage
     static_assert(sizeof(GpuFrameParams) == 28, "GpuFrameParams layout drifted");
 
     // Mirrors the Disney-BSDF-relevant fields of shaders/Material.h, plus (as
-    // of M8) the three texture-index fields added there. See
+    // of M8) the three texture-index fields added there, plus (Tier-1
+    // "opacity/cutout transparency") opacity/opacityTextureIndex. See
     // kernels/slang/shading/Material.slang for the byte-identical Slang struct.
-    // The texture indices are appended, not interleaved - existing field
-    // offsets are unchanged.
+    // Fields appended, not interleaved - existing field offsets are unchanged.
     struct GpuMaterial
     {
         float colorX, colorY, colorZ;
@@ -133,12 +133,14 @@ namespace Mirage
         float clearcoat;
         float clearcoatGloss;
         float transmission;
+        float opacity; // 1.0 = fully opaque (default) - see TraceWithCutout in Trace.slang
 
         int32_t albedoTextureIndex;    // -1 = none, use color as-is
         int32_t roughnessTextureIndex; // -1 = none, use roughness as-is
         int32_t metallicTextureIndex;  // -1 = none, use metallic as-is
+        int32_t opacityTextureIndex;   // -1 = none, use `opacity` scalar as-is
     };
-    static_assert(sizeof(GpuMaterial) == 36 + 48 + 12, "GpuMaterial layout drifted");
+    static_assert(sizeof(GpuMaterial) == 36 + 48 + 12 + 8, "GpuMaterial layout drifted");
 
     // M2 validation-only: one BSDF Eval/Pdf/Sample test case, mirrors
     // kernels/slang/shading/BsdfTestMain.slang's BsdfTestCase.
@@ -151,7 +153,7 @@ namespace Mirage
         float lx, ly, lz;
         uint32_t seed;
     };
-    static_assert(sizeof(GpuBsdfTestCase) == 96 + 8 + 36 + 4, "GpuBsdfTestCase layout drifted");
+    static_assert(sizeof(GpuBsdfTestCase) == 104 + 8 + 36 + 4, "GpuBsdfTestCase layout drifted");
 
     // M2 validation-only: BSDF Eval/Pdf/Sample results for one test case.
     struct GpuBsdfTestResult
@@ -250,6 +252,7 @@ namespace Mirage
         float albedoR, albedoG, albedoB;
         float roughness;
         float metallic;
+        float opacity; // Tier-1 "opacity/cutout transparency" - Material_SampleOpacity
     };
-    static_assert(sizeof(GpuTextureSampleTestResult) == 20, "GpuTextureSampleTestResult layout drifted");
+    static_assert(sizeof(GpuTextureSampleTestResult) == 24, "GpuTextureSampleTestResult layout drifted");
 }

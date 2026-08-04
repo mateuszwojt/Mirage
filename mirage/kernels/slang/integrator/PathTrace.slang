@@ -47,7 +47,7 @@ float3 PathTrace(float3 startOrigin, float3 startDir, float time, int maxDepth, 
         int hitPrimIndex;
         float2 hitUV;
 
-        if (Trace(rayOrigin, rayDir, rayTime, numScenePrims, t, n, hitPrimIndex, hitUV))
+        if (TraceWithCutout(rayOrigin, rayDir, rayTime, numScenePrims, rand, t, n, hitPrimIndex, hitUV))
         {
             GpuPrimitive hitPrim = g_Primitives[hitPrimIndex];
             GpuMaterial hitMaterial = g_Materials[hitPrim.materialIndex];

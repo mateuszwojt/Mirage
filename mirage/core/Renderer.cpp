@@ -9,6 +9,13 @@
 #define kProbeSamples 1.0f
 #define kRayEpsilon 0.0001f
 
+// Bounded retry count for stochastic opacity/cutout transparency
+// (TraceWithCutout below) - a chain of cutout surfaces can't stall a ray
+// indefinitely. This is a caller-side retry loop around Trace(), not a
+// BVH-traversal-level skip - QueryBVH/PrimitiveIntersect are untouched by
+// this feature (see the plan's "traversal fork" decision).
+#define kMaxCutoutRetries 4
+
 // Russian-roulette path termination: bounces below kMinRRBounce always
 // continue (keeps early, cheap-to-compute bounces noise-free); from there on
 // each bounce survives with a probability based on its throughput, boosted to
@@ -132,6 +139,62 @@ namespace Mirage
 #endif
 	}
 
+	// Traces a ray, transparently skipping past any surface that fails a
+	// stochastic opacity test (Material::opacity/opacityTextureIndex) -
+	// "cutout" transparency, matching path-tracer convention (accept/reject
+	// against a uniform draw, not alpha blending - a surface is either
+	// fully there or fully not, per sample). On a reject, the ray continues
+	// from just past the rejected hit point, without consuming
+	// caller-visible bounce/depth budget. Same signature as Trace() plus
+	// `rand`, so every call site swaps in directly. Bounded by
+	// kMaxCutoutRetries; if that budget runs out, the last-tested hit is
+	// reported as-is (treated as opaque) rather than retried forever.
+	inline bool TraceWithCutout(const Scene &scene, Ray ray, float &outT, Vec3 &outNormal, const Primitive **outPrimitive, Random &rand, Vec2 *outUV = nullptr)
+	{
+		// Opacity texture sampling needs a UV regardless of whether the
+		// caller itself wants one back (most callers here are shadow rays,
+		// which pass outUV == nullptr since they only care about occlusion).
+		Vec2 uvStorage(0.0f);
+		Vec2 *uv = outUV ? outUV : &uvStorage;
+
+		// outT must end up measured from the ORIGINAL ray origin the caller
+		// passed in, not from whatever retry-shifted origin the final
+		// accepted Trace() call used - SampleLights compares outT against
+		// an independently-computed distance-to-light from that same
+		// original origin (its "did this shadow ray actually reach the
+		// light" check), so without this running total a retried ray would
+		// report a too-short distance and wrongly treat a fully-visible
+		// light as occluded by whatever it cutout-passed-through en route.
+		float accumulatedT = 0.0f;
+
+		for (int i = 0; i < kMaxCutoutRetries; ++i)
+		{
+			float localT;
+			if (!Trace(scene, ray, localT, outNormal, outPrimitive, uv))
+				return false;
+
+			const Material &mat = ResolveMaterial(scene, (*outPrimitive)->materialIndex);
+			float opacity = mat.opacity;
+			if (mat.opacityTextureIndex >= 0)
+			{
+				const Texture *tex = scene.GetTexture(mat.opacityTextureIndex);
+				if (tex)
+					opacity = SampleTextureAlpha(*tex, *uv);
+			}
+
+			outT = accumulatedT + localT;
+
+			if (opacity >= 1.0f || rand.Randf() < opacity)
+				return true;
+
+			Vec3 p = ray.origin + ray.dir * localT;
+			accumulatedT = outT + kRayEpsilon;
+			ray = Ray(p + ray.dir * kRayEpsilon, ray.dir, ray.time);
+		}
+
+		return true; // retry budget exhausted - report the last hit as-is
+	}
+
 	// Takes the already-resolved (and, once M7's texture overrides are applied
 	// by the caller, already-textured) surface Material directly rather than a
 	// Primitive to derive it from - matches the GPU's SampleLights.slang, which
@@ -156,7 +219,7 @@ namespace Mirage
 				float t;
 				Vec3 n;
 				const Primitive *hit;
-				if (Trace(scene, Ray(surfacePos + FaceForward(surfaceNormal, wi) * kRayEpsilon, wi, time), t, n, &hit) == false)
+				if (TraceWithCutout(scene, Ray(surfacePos + FaceForward(surfaceNormal, wi) * kRayEpsilon, wi, time), t, n, &hit, rand) == false)
 				{
 					float bsdfPdf = BSDFPdf(surfaceMaterial, etaI, etaO, surfacePos, surfaceNormal, wo, wi);
 					Vec3 f = BSDFEval(surfaceMaterial, etaI, etaO, surfacePos, surfaceNormal, wo, wi);
@@ -207,7 +270,7 @@ namespace Mirage
 				float t;
 				Vec3 n;
 				const Primitive *hit;
-				if (Trace(scene, Ray(surfacePos + FaceForward(surfaceNormal, wi) * kRayEpsilon, wi, time), t, n, &hit))
+				if (TraceWithCutout(scene, Ray(surfacePos + FaceForward(surfaceNormal, wi) * kRayEpsilon, wi, time), t, n, &hit, rand))
 				{
 					float tSq = t * t;
 
@@ -289,7 +352,7 @@ namespace Mirage
 		for (int i = 0; i < maxDepth; ++i)
 		{
 			// find closest hit
-			if (Trace(scene, Ray(rayOrigin, rayDir, rayTime), t, n, &hit, &hitUV))
+			if (TraceWithCutout(scene, Ray(rayOrigin, rayDir, rayTime), t, n, &hit, rand, &hitUV))
 			{
 				// Shaded material: a per-hit copy of the resolved Material with
 				// color/roughness/metallic overridden from sampled textures

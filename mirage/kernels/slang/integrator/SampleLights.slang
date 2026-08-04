@@ -36,7 +36,7 @@ float3 SampleLights(float3 surfacePos, float3 surfaceNormal, float3 shadingNorma
             int hitPrimIndex;
             float2 shadowUV; // shadow ray - occlusion only, UV unused
             float3 shadowOrigin = surfacePos + FaceForward(surfaceNormal, wi) * kRayEpsilon;
-            if (!Trace(shadowOrigin, wi, time, numScenePrims, t, n, hitPrimIndex, shadowUV))
+            if (!TraceWithCutout(shadowOrigin, wi, time, numScenePrims, rand, t, n, hitPrimIndex, shadowUV))
             {
                 float bsdfPdf = BSDFPdf(surfaceMaterial, etaI, etaO, surfacePos, surfaceNormal, wo, wi);
                 float3 f = BSDFEval(surfaceMaterial, etaI, etaO, surfacePos, surfaceNormal, wo, wi);
@@ -81,7 +81,7 @@ float3 SampleLights(float3 surfacePos, float3 surfaceNormal, float3 shadingNorma
             int hitPrimIndex;
             float2 shadowUV; // shadow ray - occlusion only, UV unused
             float3 shadowOrigin = surfacePos + FaceForward(surfaceNormal, wi) * kRayEpsilon;
-            if (Trace(shadowOrigin, wi, time, numScenePrims, t, n, hitPrimIndex, shadowUV))
+            if (TraceWithCutout(shadowOrigin, wi, time, numScenePrims, rand, t, n, hitPrimIndex, shadowUV))
             {
                 float tSq = t * t;
                 const float kTolerance = 1.e-2f;

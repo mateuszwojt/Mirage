@@ -24,6 +24,7 @@ struct TextureSampleTestResult
     float3 albedo;
     float roughness;
     float metallic;
+    float opacity; // Tier-1 "opacity/cutout transparency" - Material_SampleOpacity
 };
 
 struct CountParams
@@ -51,6 +52,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     result.albedo = Material_SampleAlbedo(mat, tc.uv);
     result.roughness = Material_SampleRoughness(mat, tc.uv);
     result.metallic = Material_SampleMetallic(mat, tc.uv);
+    result.opacity = Material_SampleOpacity(mat, tc.uv);
 
     g_Results[i] = result;
 }

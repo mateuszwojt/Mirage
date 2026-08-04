@@ -76,4 +76,18 @@ namespace Mirage
             return 0.0f;
         return detail::SampleBilinear(tex, uv).x;
     }
+
+    // Alpha channel of a bilinear sample - used for opacity/cutout
+    // transparency (Material::opacity override). Alpha is already loaded
+    // into Texture::data's 4th channel by TextureLoader.cpp (and already
+    // uploaded to GPU as Format::RGBA32Float) but was never sampled
+    // anywhere until this. Falls back to 1.0 (fully opaque) rather than 0.0
+    // on missing/invalid texture data - an absent texture should never
+    // silently make geometry disappear.
+    inline float SampleTextureAlpha(const Texture &tex, Vec2 uv)
+    {
+        if (!tex.data || tex.width <= 0 || tex.height <= 0)
+            return 1.0f;
+        return detail::SampleBilinear(tex, uv).w;
+    }
 }
