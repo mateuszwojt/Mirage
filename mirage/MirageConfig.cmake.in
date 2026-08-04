@@ -1,0 +1,38 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Vulkan)
+
+# slang-rhi (+ its slang-rhi-resources/slang-rhi-vma companions) and the
+# prebuilt Slang compiler/runtime distribution are vendored, FetchContent-built
+# dependencies with no install()/export support of their own (slang-rhi's CMake
+# target graph is large and backend-conditional; the Slang distribution is a
+# prebuilt binary tarball, not a CMake project at all). Rather than trying to
+# re-export their native target graphs, Mirage's own build installs their
+# build artifacts as plain files (see mirage/mirage/kernels/CMakeLists.txt)
+# and this config re-wraps them as a single bundled IMPORTED target.
+if(NOT TARGET Mirage::slang-rhi-bundled)
+    add_library(Mirage::slang-rhi-bundled STATIC IMPORTED)
+    set(_mirage_slang_rhi_link_libs
+        "${PACKAGE_PREFIX_DIR}/lib/libslang-rhi-resources.a"
+        "${PACKAGE_PREFIX_DIR}/lib/libslang-rhi-vma.a"
+        "${PACKAGE_PREFIX_DIR}/lib/libslang.dylib"
+    )
+    if(APPLE)
+        # slang-rhi's Metal backend (built by default alongside Vulkan on
+        # Darwin, even though VulkanRenderer never requests a Metal device)
+        # needs these frameworks - see slang-rhi's own CMakeLists.txt
+        # (target_link_libraries(slang-rhi INTERFACE "-framework ...")),
+        # which the bundled-static-lib rewrap above can't inherit automatically.
+        list(APPEND _mirage_slang_rhi_link_libs "-framework Metal" "-framework Foundation" "-framework QuartzCore")
+    endif()
+    set_target_properties(Mirage::slang-rhi-bundled PROPERTIES
+        IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/lib/libslang-rhi.a"
+        INTERFACE_LINK_LIBRARIES "${_mirage_slang_rhi_link_libs}"
+    )
+    unset(_mirage_slang_rhi_link_libs)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/MirageTargets.cmake")
+
+check_required_components(Mirage)

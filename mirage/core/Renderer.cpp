@@ -1,0 +1,636 @@
+#include "mirage/core/Renderer.h"
+#include "mirage/core/Intersection.h"
+#include "mirage/core/Sampler.h"
+#include "mirage/shaders/Disney.h"
+#include "mirage/shaders/TextureSampling.h"
+#include "mirage/utils/Util.h"
+
+#define kBsdfSamples 1.0f
+#define kProbeSamples 1.0f
+#define kRayEpsilon 0.0001f
+
+#define USE_LIGHT_SAMPLING 1
+#define USE_SCENE_BVH 1
+
+namespace Mirage
+{
+	// Primitive::materialIndex may be unassigned (-1, e.g. a primitive that was
+	// never routed through Scene::AddMaterial/FindOrAddMaterial); resolving
+	// through this helper rather than Scene::GetMaterial directly preserves the
+	// pre-migration behavior where every Primitive always carried a valid,
+	// default-constructed Material value.
+	inline const Material &ResolveMaterial(const Scene &scene, int materialIndex)
+	{
+		static const Material kDefaultMaterial;
+		const Material *mat = scene.GetMaterial(materialIndex);
+		return mat ? *mat : kDefaultMaterial;
+	}
+
+	// trace a ray against the scene returning the closest intersection
+	// outUV mirrors outNormal: populated only for eMesh hits on a UV-bearing
+	// mesh, left at the caller's initial value otherwise (see
+	// PrimitiveIntersect's outUV comment in Intersection.h). Defaulted so
+	// existing shadow-ray/visibility-only callers (which never shade the hit,
+	// only test occlusion - e.g. SampleLights' two Trace() calls) don't need
+	// to pass or care about it.
+	inline bool Trace(const Scene &scene, const Ray &ray, float &outT, Vec3 &outNormal, const Primitive **outPrimitive, Vec2 *outUV = nullptr)
+	{
+
+#if USE_SCENE_BVH
+
+		struct Callback
+		{
+			float minT;
+			Vec3 closestNormal;
+			Vec2 closestUV;
+			const Primitive *closestPrimitive;
+
+			Ray ray;
+			const Scene &scene;
+
+			Callback(const Scene &s, const Ray &r) : minT(REAL_MAX), closestPrimitive(nullptr), ray(r), scene(s)
+			{
+			}
+
+			void operator()(int index)
+			{
+				float t;
+				Vec3 n, ns;
+				Vec2 uv;
+
+				const Primitive &primitive = scene.primitives[index];
+
+				if (PrimitiveIntersect(primitive, ray, t, &n, &uv))
+				{
+					if (t < minT && t > 0.0f)
+					{
+						minT = t;
+						closestPrimitive = &primitive;
+						closestNormal = n;
+						closestUV = uv;
+					}
+				}
+			}
+		};
+
+		Callback callback(scene, ray);
+		QueryBVH(callback, scene.bvh.nodes, ray.origin, ray.dir);
+
+		outT = callback.minT;
+		outNormal = FaceForward(callback.closestNormal, -ray.dir);
+		*outPrimitive = callback.closestPrimitive;
+		if (outUV)
+			*outUV = callback.closestUV;
+
+		return callback.closestPrimitive != nullptr;
+
+#else
+
+		// disgard hits closer than this distance to avoid self intersection artifacts
+		float minT = REAL_MAX;
+		const Primitive *closestPrimitive = nullptr;
+		Vec3 closestNormal(0.0f);
+		Vec2 closestUV(0.0f);
+
+		for (Scene::PrimitiveArray::const_iterator iter = scene.primitives.begin(), end = scene.primitives.end(); iter != end; ++iter)
+		{
+			float t;
+			Vec3 n, ns;
+			Vec2 uv;
+
+			const Primitive &primitive = *iter;
+
+			if (PrimitiveIntersect(primitive, ray, t, &n, &uv))
+			{
+				if (t < minT && t > 0.0f)
+				{
+					minT = t;
+					closestPrimitive = &primitive;
+					closestNormal = n;
+					closestUV = uv;
+				}
+			}
+		}
+
+		outT = minT;
+		outNormal = FaceForward(closestNormal, -ray.dir);
+		*outPrimitive = closestPrimitive;
+		if (outUV)
+			*outUV = closestUV;
+
+		return closestPrimitive != nullptr;
+
+#endif
+	}
+
+	// Takes the already-resolved (and, once M7's texture overrides are applied
+	// by the caller, already-textured) surface Material directly rather than a
+	// Primitive to derive it from - matches the GPU's SampleLights.slang, which
+	// likewise takes `GpuMaterial surfaceMaterial` by value rather than deriving
+	// it from a primitive/material-buffer lookup internally.
+	inline Vec3 SampleLights(const Scene &scene, const Material &surfaceMaterial, float etaI, float etaO, const Vec3 &surfacePos, const Vec3 &surfaceNormal, const Vec3 &shadingNormal, const Vec3 &wo, float time, Random &rand)
+	{
+		Vec3 sum(0.0f);
+
+		if (scene.sky.probe.valid)
+		{
+			for (int i = 0; i < kProbeSamples; ++i)
+			{
+
+				Vec3 skyColor;
+				float skyPdf;
+				Vec3 wi;
+
+				ProbeSample(scene.sky.probe, wi, skyColor, skyPdf, rand);
+
+				// check if occluded
+				float t;
+				Vec3 n;
+				const Primitive *hit;
+				if (Trace(scene, Ray(surfacePos + FaceForward(surfaceNormal, wi) * kRayEpsilon, wi, time), t, n, &hit) == false)
+				{
+					float bsdfPdf = BSDFPdf(surfaceMaterial, etaI, etaO, surfacePos, surfaceNormal, wo, wi);
+					Vec3 f = BSDFEval(surfaceMaterial, etaI, etaO, surfacePos, surfaceNormal, wo, wi);
+
+					if (bsdfPdf > 0.0f)
+					{
+						int N = kProbeSamples + kBsdfSamples;
+						float cbsdf = kBsdfSamples / N;
+						float csky = float(kProbeSamples) / N;
+						float weight = csky * skyPdf / (cbsdf * bsdfPdf + csky * skyPdf);
+
+						if (weight > 0.0f)
+							sum += weight * skyColor * f * Abs(Dot(wi, surfaceNormal)) / skyPdf;
+					}
+				}
+			}
+
+			if (kProbeSamples > 0)
+				sum /= float(kProbeSamples);
+		}
+
+		for (int i = 0; i < scene.primitives.size(); ++i)
+		{
+			// assume all lights are area lights for now
+			const Primitive &lightPrimitive = scene.primitives[i];
+
+			Vec3 L(0.0f);
+
+			int numSamples = lightPrimitive.lightSamples;
+
+			if (numSamples == 0)
+				continue;
+
+			for (int s = 0; s < numSamples; ++s)
+			{
+				// sample light source
+				Vec3 lightPos;
+				Vec3 lightNormal;
+
+				PrimitiveSample(lightPrimitive, time, lightPos, lightNormal, rand);
+
+				Vec3 wi = lightPos - surfacePos;
+
+				float dSq = LengthSq(wi);
+				wi /= sqrtf(dSq);
+
+				// check visibility
+				float t;
+				Vec3 n;
+				const Primitive *hit;
+				if (Trace(scene, Ray(surfacePos + FaceForward(surfaceNormal, wi) * kRayEpsilon, wi, time), t, n, &hit))
+				{
+					float tSq = t * t;
+
+					// if our next hit was further than distance to light then accept
+					// sample, this works for portal sampling where you have a large light
+					// that you sample through a small window
+					const float kTolerance = 1.e-2f;
+
+					if (fabsf(t - sqrtf(dSq)) <= kTolerance)
+					{
+						const float nl = Abs(Dot(lightNormal, wi));
+
+						// for glancing rays, note we use abs to include cases
+						// where light surface is backfacing, e.g.: inside the weak furnace
+						if (Abs(nl) < 1.e-6f)
+							continue;
+
+						// light pdf with respect to area and convert to pdf with respect to solid angle
+						float lightArea = PrimitiveArea(lightPrimitive);
+						float lightPdf = ((1.0f / lightArea) * tSq) / nl;
+
+						// bsdf pdf for light's direction
+						float bsdfPdf = BSDFPdf(surfaceMaterial, etaI, etaO, surfacePos, shadingNormal, wo, wi);
+						Vec3 f = BSDFEval(surfaceMaterial, etaI, etaO, surfacePos, shadingNormal, wo, wi);
+
+						// this branch is only necessary to exclude specular paths from light sampling
+						// todo: make BSDFEval always return zero for pure specular paths and roll specular eval into BSDFSample()
+						if (bsdfPdf > 0.0f)
+						{
+							// calculate relative weighting of the light and bsdf sampling
+							int N = lightPrimitive.lightSamples + kBsdfSamples;
+							float cbsdf = kBsdfSamples / N;
+							float clight = float(lightPrimitive.lightSamples) / N;
+							float weight = clight * lightPdf / (cbsdf * bsdfPdf + clight * lightPdf);
+
+							L += weight * f * ResolveMaterial(scene, hit->materialIndex).emission * (Abs(Dot(wi, shadingNormal)) / Max(1.e-3f, lightPdf));
+						}
+					}
+				}
+			}
+
+			sum += L * (1.0f / numSamples);
+		}
+
+		return sum;
+	}
+
+	// reference, no light sampling, uniform hemisphere sampling
+	Vec3 PathTrace(const Scene &scene, const Vec3 &startOrigin, const Vec3 &startDir, float time, int maxDepth, Random &rand,
+				   float *outDepth = nullptr, Vec3 *outNormal = nullptr, const Primitive **outHitPrim = nullptr)
+	{
+		// Primary-ray AOV capture defaults - overwritten below on a primary-ray
+		// hit (i == 0). Left at these sentinels on a primary-ray miss, so a
+		// background pixel reports depth 0 / normal 0 / primId -1 rather than
+		// stale or garbage data.
+		if (outDepth) *outDepth = 0.0f;
+		if (outNormal) *outNormal = Vec3(0.0f);
+		if (outHitPrim) *outHitPrim = nullptr;
+
+		// path throughput
+		Vec3 pathThroughput(1.0f, 1.0f, 1.0f);
+		// accumulated radiance
+		Vec3 totalRadiance(0.0f, 0.0f, 0.0f);
+
+		Vec3 rayOrigin = startOrigin;
+		Vec3 rayDir = startDir;
+		float rayTime = time;
+		float rayEta = 1.0f;
+		Vec3 rayAbsorption = 0.0f;
+		BSDFType rayType = eReflected;
+
+		float t = 0.0f;
+		Vec3 n;
+		Vec2 hitUV(0.0f);
+		const Primitive *hit;
+
+		float bsdfPdf = 1.0f;
+
+		for (int i = 0; i < maxDepth; ++i)
+		{
+			// find closest hit
+			if (Trace(scene, Ray(rayOrigin, rayDir, rayTime), t, n, &hit, &hitUV))
+			{
+				// Shaded material: a per-hit copy of the resolved Material with
+				// color/roughness/metallic overridden from sampled textures
+				// where bound - built once here so every subsequent BSDF call
+				// this iteration (direct, via BSDFSample/BSDFEval below, and
+				// indirect, via SampleLights) sees the same textured values.
+				// hitUV is only meaningful for eMesh hits on a UV-bearing mesh
+				// (see Trace()/PrimitiveIntersect()'s outUV comments) - a
+				// texture-indexed material on a primitive with no UV data just
+				// samples texel (0,0) uniformly, which is safe, not a crash.
+				Material shadedMaterial = ResolveMaterial(scene, hit->materialIndex);
+				if (shadedMaterial.albedoTextureIndex >= 0)
+				{
+					const Texture *tex = scene.GetTexture(shadedMaterial.albedoTextureIndex);
+					if (tex)
+						shadedMaterial.color = SampleTextureRGB(*tex, hitUV);
+				}
+				if (shadedMaterial.roughnessTextureIndex >= 0)
+				{
+					const Texture *tex = scene.GetTexture(shadedMaterial.roughnessTextureIndex);
+					if (tex)
+						shadedMaterial.roughness = SampleTextureR(*tex, hitUV);
+				}
+				if (shadedMaterial.metallicTextureIndex >= 0)
+				{
+					const Texture *tex = scene.GetTexture(shadedMaterial.metallicTextureIndex);
+					if (tex)
+						shadedMaterial.metallic = SampleTextureR(*tex, hitUV);
+				}
+				const Material &hitMaterial = shadedMaterial;
+
+				float outEta;
+				Vec3 outAbsorption;
+
+				// index of refraction for transmission, 1.0 corresponds to air
+				if (rayEta == 1.0f)
+				{
+					outEta = hitMaterial.GetIndexOfRefraction();
+					outAbsorption = Vec3(hitMaterial.absorption);
+				}
+				else
+				{
+					// returning to free space
+					outEta = 1.0f;
+					outAbsorption = 0.0f;
+				}
+
+				// update throughput based on absorption through the medium
+				pathThroughput *= Exp(-rayAbsorption * t);
+
+				// calculate new ray position
+				const Vec3 p = rayOrigin + rayDir * t;
+
+				if (i == 0)
+				{
+					// First-hit AOV capture - t/n/hit are the primary ray's
+					// hit distance, shading normal, and hit primitive, needed
+					// for the depth/normal/primId AOVs regardless of which
+					// light-sampling code path below actually runs.
+					if (outDepth) *outDepth = t;
+					if (outNormal) *outNormal = n;
+					if (outHitPrim) *outHitPrim = hit;
+				}
+
+#if USE_LIGHT_SAMPLING
+
+				if (i == 0)
+				{
+					// first trace is our only chance to add contribution from directly visible light sources
+					totalRadiance += hitMaterial.emission;
+				}
+				else if (kBsdfSamples > 0)
+				{
+					// area pdf that this dir was already included by the light sampling from previous step
+					float lightArea = PrimitiveArea(*hit);
+
+					if (lightArea > 0.0f)
+					{
+						// convert to pdf with respect to solid angle
+						float lightPdf = ((1.0f / lightArea) * t * t) / Clamp(Dot(-rayDir, n), 1.e-3f, 1.0f);
+
+						// calculate weight for bsdf sampling
+						int N = hit->lightSamples + kBsdfSamples;
+						float cbsdf = kBsdfSamples / N;
+						float clight = float(hit->lightSamples) / N;
+						float weight = cbsdf * bsdfPdf / (cbsdf * bsdfPdf + clight * lightPdf);
+
+						// specular paths have zero chance of being included by direct light sampling (zero pdf)
+						if (rayType == eSpecular)
+							weight = 1.0f;
+
+						// pathThroughput already includes the bsdf pdf
+						totalRadiance += weight * pathThroughput * hitMaterial.emission;
+					}
+				}
+
+				// integrate direct light over hemisphere
+				totalRadiance += pathThroughput * SampleLights(scene, hitMaterial, rayEta, outEta, p, n, n, -rayDir, rayTime, rand);
+#else
+
+				// include emission from the new primitive
+				totalRadiance += pathThroughput * hitMaterial.emission;
+
+#endif
+
+				// terminate ray if we hit a light source
+				if (hit->lightSamples)
+					break;
+
+				// integrate indirect light by sampling BRDF
+				Vec3 u, v;
+				BasisFromVector(n, &u, &v);
+
+				Vec3 bsdfDir;
+				BSDFType bsdfType;
+				BSDFSample(hitMaterial, rayEta, outEta, p, u, v, n, -rayDir, bsdfDir, bsdfPdf, bsdfType, rand);
+
+				if (bsdfPdf <= 0.0f)
+					break;
+
+				// reflectance
+				Vec3 f = BSDFEval(hitMaterial, rayEta, outEta, p, n, -rayDir, bsdfDir);
+
+				// update ray medium if we are transmitting through the material
+				if (Dot(bsdfDir, n) <= 0.0f)
+				{
+					rayEta = outEta;
+					rayType = eTransmitted;
+					rayAbsorption = outAbsorption;
+				}
+				else
+				{
+					rayType = eReflected;
+				}
+
+				// update throughput with primitive reflectance
+				pathThroughput *= f * Abs(Dot(n, bsdfDir)) / bsdfPdf;
+
+				// update path direction
+				rayType = bsdfType;
+				rayDir = bsdfDir;
+				rayOrigin = p + FaceForward(n, bsdfDir) * kRayEpsilon;
+			}
+			else
+			{
+				// hit nothing, sample sky dome and terminate
+				float weight = 1.0f;
+
+				if (scene.sky.probe.valid && i > 0 && rayType != eSpecular)
+				{
+					// probability that this dir was already sampled by probe sampling
+					float skyPdf = ProbePdf(scene.sky.probe, rayDir);
+
+					int N = kProbeSamples + kBsdfSamples;
+					float cbsdf = kBsdfSamples / N;
+					float csky = float(kProbeSamples) / N;
+
+					weight = cbsdf * bsdfPdf / (cbsdf * bsdfPdf + csky * skyPdf);
+				}
+
+				totalRadiance += weight * scene.sky.Eval(rayDir) * pathThroughput;
+				break;
+			}
+		}
+
+		return totalRadiance;
+	}
+
+	struct CpuRenderer : public Renderer
+	{
+		CpuRenderer(const Scene *s) : scene(s)
+		{
+		}
+
+		const Scene *scene;
+
+		Random rand;
+
+		void AddSample(Color *output, int width, int height, float rasterX, float rasterY, float clamp, const Filter &filter, const Vec3 &sample)
+		{
+			switch (filter.type)
+			{
+			case eFilterBox:
+			{
+				int startX = Max(0, int(rasterX - filter.width));
+				int startY = Max(0, int(rasterY - filter.width));
+				int endX = Min(int(rasterX + filter.width), width - 1);
+				int endY = Min(int(rasterY + filter.width), height - 1);
+
+				Vec3 c = ClampLength(sample, clamp);
+
+				for (int x = startX; x <= endX; ++x)
+				{
+					for (int y = startY; y <= endY; ++y)
+					{
+						output[y * width + x] += Color(c, 1.0f);
+					}
+				}
+
+				break;
+			}
+			case eFilterGaussian:
+			{
+				int startX = Max(0, int(rasterX - filter.width));
+				int startY = Max(0, int(rasterY - filter.width));
+				int endX = Min(int(rasterX + filter.width), width - 1);
+				int endY = Min(int(rasterY + filter.width), height - 1);
+
+				Vec3 c = ClampLength(sample, clamp);
+
+				for (int x = startX; x <= endX; ++x)
+				{
+					for (int y = startY; y <= endY; ++y)
+					{
+						float w = filter.Eval(x - rasterX, y - rasterY);
+
+						output[y * width + x] += Color(c * w, w);
+					}
+				}
+				break;
+			}
+			};
+		}
+
+		void Render(const Camera &camera, const Options &options, Color *output, AovBuffers *aovs = nullptr)
+		{
+			// create a sampler for the camera
+			CameraSampler sampler(
+				Transform(camera.position, camera.rotation),
+				camera.fov,
+				0.001f,
+				1.0f,
+				camera.aperture,
+				camera.focalPoint,
+				options.enableDOF,
+				options.width,
+				options.height);
+
+			Random decorrelation;
+
+			// for (int k=0; k < options.maxSamples; ++k)
+			{
+				for (int j = 0; j < options.height; ++j)
+				{
+
+#pragma omp parallel for schedule(dynamic, 1)
+
+					for (int i = 0; i < options.width; ++i)
+					{
+						Vec3 origin;
+						Vec3 dir;
+
+						// generate a ray
+						switch (options.mode)
+						{
+						case ePathTrace:
+						{
+							float x, y, t;
+
+							Sample2D(rand, x, y);
+							Sample1D(rand, t);
+
+							float time = Lerp(camera.shutterStart, camera.shutterEnd, t);
+
+							x += i;
+							y += j;
+
+							sampler.GenerateRay(x, y, origin, dir);
+
+							float hitDepth = 0.0f;
+							Vec3 hitNormal;
+							const Primitive *hitPrim = nullptr;
+							bool wantAovs = (aovs != nullptr) && (options.aovMask != 0);
+
+							Vec3 sample = PathTrace(*scene, origin, dir, time, options.maxDepth, rand,
+													 wantAovs ? &hitDepth : nullptr,
+													 wantAovs ? &hitNormal : nullptr,
+													 wantAovs ? &hitPrim : nullptr);
+
+							AddSample(output, options.width, options.height, x, y, options.clamp, options.filter, sample);
+
+							if (wantAovs)
+							{
+								// Direct per-pixel write (own index, no filter
+								// splat) - unlike AddSample's antialiasing
+								// scatter, depth/normal/primId are discrete
+								// single-valued snapshots that must not blur
+								// across neighboring pixels.
+								int idx = j * options.width + i;
+								if ((options.aovMask & kAovDepth) && aovs->depth)
+									aovs->depth[idx] = Color(hitDepth, 0.0f, 0.0f, 1.0f);
+								if ((options.aovMask & kAovNormal) && aovs->normal)
+									aovs->normal[idx] = Color(hitNormal.x, hitNormal.y, hitNormal.z, 1.0f);
+								if ((options.aovMask & kAovPrimId) && aovs->primId)
+									aovs->primId[idx] = Color(hitPrim ? (float)hitPrim->hydraId : -1.0f, 0.0f, 0.0f, 1.0f);
+							}
+
+							break;
+						}
+						case eNormals:
+						{
+							const float x = i; // + 0.5f;
+							const float y = j; // + 0.5f;
+
+							sampler.GenerateRay(x, y, origin, dir);
+
+							const Primitive *p;
+							float t;
+							Vec3 n;
+
+							if (Trace(*scene, Ray(origin, dir, 1.0f), t, n, &p))
+							{
+								n = n * 0.5f + 0.5f;
+								output[j * options.width + i] = Color(n.x, n.y, n.z, 1.0f);
+							}
+							else
+							{
+								output[j * options.width + i] = Color(0.0f);
+							}
+							break;
+						}
+						case eComplexity:
+						{
+							break;
+						}
+						}
+					}
+				}
+			}
+		}
+	};
+
+	Renderer *CreateCpuRenderer(const Scene *s)
+	{
+		return new CpuRenderer(s);
+	}
+
+	struct NullRenderer : public Renderer
+	{
+		virtual ~NullRenderer() {}
+
+		virtual void Init(int width, int height) {}
+		virtual void Render(const Camera &c, const Options &options, Color *output, AovBuffers *aovs = nullptr)
+		{
+			memset(output, 0, options.width * options.height * sizeof(Color));
+		};
+	};
+
+	Renderer *CreateNullRenderer(const Scene *s)
+	{
+		return new NullRenderer();
+	}
+}
