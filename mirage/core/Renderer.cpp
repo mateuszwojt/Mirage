@@ -9,6 +9,15 @@
 #define kProbeSamples 1.0f
 #define kRayEpsilon 0.0001f
 
+// Russian-roulette path termination: bounces below kMinRRBounce always
+// continue (keeps early, cheap-to-compute bounces noise-free); from there on
+// each bounce survives with a probability based on its throughput, boosted to
+// stay unbiased in expectation, instead of always running to the hard
+// maxDepth cutoff. kMinRRProb floors the survival probability so throughput
+// can never make a path un-terminable.
+#define kMinRRBounce 3
+#define kMinRRProb 0.05f
+
 #define USE_LIGHT_SAMPLING 1
 #define USE_SCENE_BVH 1
 
@@ -419,6 +428,20 @@ namespace Mirage
 				// update throughput with primitive reflectance
 				pathThroughput *= f * Abs(Dot(n, bsdfDir)) / bsdfPdf;
 
+				// Russian roulette: stochastically terminate low-throughput
+				// paths past a minimum bounce count instead of always running
+				// to maxDepth. Surviving paths get their throughput boosted
+				// by 1/continueProb so this stays unbiased in expectation -
+				// glass/deep-GI paths converge instead of being flatly
+				// truncated at the hard depth cutoff.
+				if (i >= kMinRRBounce)
+				{
+					float continueProb = Clamp(Max(Max(pathThroughput.x, pathThroughput.y), pathThroughput.z), kMinRRProb, 1.0f);
+					if (rand.Randf() > continueProb)
+						break;
+					pathThroughput /= continueProb;
+				}
+
 				// update path direction
 				rayType = bsdfType;
 				rayDir = bsdfDir;
@@ -456,8 +479,6 @@ namespace Mirage
 		}
 
 		const Scene *scene;
-
-		Random rand;
 
 		void AddSample(Color *output, int width, int height, float rasterX, float rasterY, float clamp, const Filter &filter, const Vec3 &sample)
 		{
@@ -519,9 +540,7 @@ namespace Mirage
 				options.width,
 				options.height);
 
-			Random decorrelation;
-
-			// for (int k=0; k < options.maxSamples; ++k)
+			for (int k = 0; k < options.maxSamples; ++k)
 			{
 				for (int j = 0; j < options.height; ++j)
 				{
@@ -538,6 +557,19 @@ namespace Mirage
 						{
 						case ePathTrace:
 						{
+							// Per-pixel, per-sample RNG stream, seeded from
+							// (i, j, k) rather than sharing one Random across
+							// every pixel/thread. A single shared instance
+							// would be mutated concurrently by every OpenMP
+							// thread with no synchronization (a data race,
+							// previously masked by only ever taking 1 sample),
+							// and would also correlate samples across pixels
+							// instead of decorrelating them - same hash-seed
+							// style as the GPU path's per-frame seed (see
+							// VulkanRenderer.cpp's frameSeed).
+							uint32_t seed = (uint32_t)(j * options.width + i) * 9781u + (uint32_t)k * 6271u + 1u;
+							Random rand((int)seed);
+
 							float x, y, t;
 
 							Sample2D(rand, x, y);
@@ -553,7 +585,7 @@ namespace Mirage
 							float hitDepth = 0.0f;
 							Vec3 hitNormal;
 							const Primitive *hitPrim = nullptr;
-							bool wantAovs = (aovs != nullptr) && (options.aovMask != 0);
+							bool wantAovs = (aovs != nullptr) && (options.aovMask != 0) && (k == 0);
 
 							Vec3 sample = PathTrace(*scene, origin, dir, time, options.maxDepth, rand,
 													 wantAovs ? &hitDepth : nullptr,
@@ -568,7 +600,10 @@ namespace Mirage
 								// splat) - unlike AddSample's antialiasing
 								// scatter, depth/normal/primId are discrete
 								// single-valued snapshots that must not blur
-								// across neighboring pixels.
+								// across neighboring pixels. Only captured on
+								// the first sample (k == 0) so AA jitter across
+								// samples can't perturb which primitive/depth
+								// gets reported near silhouette edges.
 								int idx = j * options.width + i;
 								if ((options.aovMask & kAovDepth) && aovs->depth)
 									aovs->depth[idx] = Color(hitDepth, 0.0f, 0.0f, 1.0f);
@@ -609,6 +644,25 @@ namespace Mirage
 						}
 					}
 				}
+			}
+
+			// Resolve: divide each pixel's accumulated color by its
+			// accumulated filter weight. AddSample() only ever splats
+			// Color(c*w, w) - color and filter weight - so without this the
+			// reconstruction filter is unnormalized and pixels near a filter
+			// footprint's edge (where accumulated weight < the center-tap
+			// weight) come out too dim. Mirrors the resolve step the GPU path
+			// does host-side at readback time (VulkanRenderer.cpp's
+			// RunPathTrace, dividing acc.rgb by acc.w). Safe for eNormals too:
+			// it always writes w == 1 on a hit / w == 0 on a miss directly, so
+			// this is a no-op there beyond the guarded miss case. Keeps the
+			// raw accumulated weight in alpha (not collapsed to 1) to match
+			// the GPU path's output convention.
+			for (int idx = 0; idx < options.width * options.height; ++idx)
+			{
+				float w = output[idx].w;
+				float invW = w > 0.0f ? 1.0f / w : 0.0f;
+				output[idx] = Color(output[idx].x * invW, output[idx].y * invW, output[idx].z * invW, w);
 			}
 		}
 	};
