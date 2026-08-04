@@ -94,6 +94,11 @@ namespace Mirage
         // the plan's "no existing change-tracking on Mirage::Scene" risk).
         bool sceneUploaded = false;
         ComPtr<IBuffer> primitivesBuf, meshDescBuf, sceneBvhBuf, meshBvhBuf, positionsBuf, normalsBuf, indicesBuf, uvsBuf;
+        // Deforming (2-keyframe) motion blur (Tier-1 feature 2): end-of-shutter
+        // vertex mega-buffer, parallel to positionsBuf - padded to one dummy
+        // element (never indexed) when no mesh in the scene has motion, same
+        // as every other CreateStructuredBuffer call below.
+        ComPtr<IBuffer> positionsEndBuf;
         ComPtr<IBuffer> materialsBuf, skyBuf;
         uint32_t numPrimitivesUploaded = 0;
 
@@ -408,6 +413,7 @@ namespace Mirage
 
             std::vector<GpuMeshDescriptor> meshDescs;
             std::vector<float3_> positions, normals; // defined below as plain float3
+            std::vector<float3_> positionsEnd; // deforming motion blur, see GpuMeshDescriptor::hasMotion
             std::vector<float2_> uvs;
             std::vector<int32_t> indices;
             std::vector<GpuBVHNode> meshBvhNodes;
@@ -424,6 +430,8 @@ namespace Mirage
                 desc.numIndices = (uint32_t)mesh->indices.size();
                 desc.numNodes = (uint32_t)mesh->bvh.numNodes;
                 desc.area = mesh->area;
+                desc.hasMotion = mesh->HasMotion() ? 1u : 0u;
+                desc.vertexOffsetEnd = (uint32_t)positionsEnd.size();
                 meshDescs.push_back(desc);
 
                 for (auto &v : mesh->vertices)
@@ -436,6 +444,11 @@ namespace Mirage
                     indices.push_back(idx);
                 for (int i = 0; i < mesh->bvh.numNodes; ++i)
                     meshBvhNodes.push_back(ConvertBVHNode(mesh->bvh.nodes[i]));
+                if (mesh->HasMotion())
+                {
+                    for (auto &v : mesh->verticesEnd)
+                        positionsEnd.push_back({v.x, v.y, v.z});
+                }
             }
 
             // One GpuMaterial per Scene::materials entry (shared/deduplicated -
@@ -482,12 +495,27 @@ namespace Mirage
                     gp.unionDataW = prim.plane.plane[3];
                     break;
                 case eMesh:
-                    for (size_t i = 0; i < meshPtrs.size(); ++i)
+                    if (prim.mesh.meshIndex >= 0 && (size_t)prim.mesh.meshIndex < meshPtrs.size())
                     {
-                        if ((unsigned long)meshPtrs[i] == prim.mesh.id)
+                        // Fast path: the scene owner already resolved this
+                        // primitive's mesh index (e.g. via Scene::AddMesh's
+                        // return value) - see MeshGeometry::meshIndex.
+                        gp.meshIndex = prim.mesh.meshIndex;
+                    }
+                    else
+                    {
+                        // Fallback for callers that predate meshIndex (e.g.
+                        // an out-of-repo Hydra delegate still using the
+                        // original GeometryFromMesh()+AddMesh() pattern) -
+                        // resolve by pointer identity instead, exactly as
+                        // this loop always did before that field existed.
+                        for (size_t i = 0; i < meshPtrs.size(); ++i)
                         {
-                            gp.meshIndex = (int32_t)i;
-                            break;
+                            if ((unsigned long)meshPtrs[i] == prim.mesh.id)
+                            {
+                                gp.meshIndex = (int32_t)i;
+                                break;
+                            }
                         }
                     }
                     break;
@@ -516,6 +544,7 @@ namespace Mirage
             sceneBvhBuf = CreateStructuredBuffer(sceneBvhNodes);
             meshBvhBuf = CreateStructuredBuffer(meshBvhNodes);
             positionsBuf = CreateStructuredBuffer(positions);
+            positionsEndBuf = CreateStructuredBuffer(positionsEnd);
             normalsBuf = CreateStructuredBuffer(normals);
             indicesBuf = CreateStructuredBuffer(indices);
             uvsBuf = CreateStructuredBuffer(uvs);
@@ -591,6 +620,7 @@ namespace Mirage
                 cursor["g_SceneBVH"].setBinding(sceneBvhBuf);
                 cursor["g_MeshBVHNodes"].setBinding(meshBvhBuf);
                 cursor["g_Positions"].setBinding(positionsBuf);
+                cursor["g_PositionsEnd"].setBinding(positionsEndBuf);
                 cursor["g_Normals"].setBinding(normalsBuf);
                 cursor["g_Indices"].setBinding(indicesBuf);
 
@@ -691,6 +721,7 @@ namespace Mirage
                 cursor["g_SceneBVH"].setBinding(sceneBvhBuf);
                 cursor["g_MeshBVHNodes"].setBinding(meshBvhBuf);
                 cursor["g_Positions"].setBinding(positionsBuf);
+                cursor["g_PositionsEnd"].setBinding(positionsEndBuf);
                 cursor["g_Normals"].setBinding(normalsBuf);
                 cursor["g_Indices"].setBinding(indicesBuf);
                 cursor["g_UVs"].setBinding(uvsBuf);
@@ -823,6 +854,7 @@ namespace Mirage
                 cursor["g_SceneBVH"].setBinding(sceneBvhBuf);
                 cursor["g_MeshBVHNodes"].setBinding(meshBvhBuf);
                 cursor["g_Positions"].setBinding(positionsBuf);
+                cursor["g_PositionsEnd"].setBinding(positionsEndBuf);
                 cursor["g_Normals"].setBinding(normalsBuf);
                 cursor["g_Indices"].setBinding(indicesBuf);
                 cursor["g_UVs"].setBinding(uvsBuf);

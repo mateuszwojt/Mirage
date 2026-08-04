@@ -32,6 +32,12 @@ struct GpuMeshDescriptor
     uint numVertices, numIndices, numNodes;
     float area;
     uint hasUVs; // 0/1 - disambiguates "no UV buffer for this mesh" from "its UVs start at offset 0"
+    // Deforming (2-keyframe) motion blur (Tier-1 feature 2): same
+    // disambiguation pattern as hasUVs above - hasMotion == 0 means the mesh
+    // is static and vertexOffsetEnd is meaningless. Mirrors Mesh::HasMotion()
+    // on the CPU side.
+    uint vertexOffsetEnd;
+    uint hasMotion;
 };
 
 uniform StructuredBuffer<GpuPrimitive> g_Primitives;
@@ -39,6 +45,7 @@ uniform StructuredBuffer<GpuMeshDescriptor> g_MeshDescriptors;
 uniform StructuredBuffer<BVHNode> g_SceneBVH;
 uniform StructuredBuffer<BVHNode> g_MeshBVHNodes;
 uniform StructuredBuffer<float3> g_Positions;
+uniform StructuredBuffer<float3> g_PositionsEnd;
 uniform StructuredBuffer<float3> g_Normals;
 uniform StructuredBuffer<int> g_Indices;
 uniform StructuredBuffer<float2> g_UVs;

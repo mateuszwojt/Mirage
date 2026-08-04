@@ -83,7 +83,15 @@ namespace Mirage
 		void Clear();
 
 		void AddPrimitive(const Primitive &prim);
-		void AddMesh(std::unique_ptr<Mesh> mesh);
+
+		// Returns the new mesh's index in `meshes` (-1 if `mesh` was null,
+		// same no-op-on-null behavior as before this return value existed) -
+		// callers can stash it as MeshGeometry::meshIndex so
+		// VulkanRenderer::UploadScene can resolve the primitive's
+		// GpuMeshDescriptor in O(1) instead of an O(meshes) pointer scan.
+		// Existing call sites that ignore the return value keep compiling
+		// and behaving exactly as before.
+		int AddMesh(std::unique_ptr<Mesh> mesh);
 
 		// Always appends a new entry and returns its index - use when there is
 		// no natural dedup key (e.g. kernel_validate's ad-hoc test scenes).

@@ -18,20 +18,23 @@ namespace Mirage
             geo.uvs = nullptr;
             geo.nodes = nullptr;
             geo.cdf = nullptr;
+            geo.positionsEnd = nullptr;
             geo.numNodes = 0;
             geo.numIndices = 0;
             geo.numVertices = 0;
             geo.area = 0.0f;
             geo.id = 0;
+            geo.meshIndex = -1;
             return geo;
         }
-        
+
         geo.positions = &mesh->vertices[0];
         geo.normals = mesh->normals.empty() ? nullptr : &mesh->normals[0];
         geo.indices = mesh->indices.empty() ? nullptr : &mesh->indices[0];
         geo.uvs = mesh->uvs.empty() ? nullptr : &mesh->uvs[0];
         geo.nodes = (mesh->bvh.numNodes > 0 && mesh->bvh.nodes) ? &mesh->bvh.nodes[0] : nullptr;
         geo.cdf = mesh->cdf.empty() ? nullptr : &mesh->cdf[0];
+        geo.positionsEnd = mesh->HasMotion() ? &mesh->verticesEnd[0] : nullptr;
         geo.area = mesh->area;
 
         geo.numNodes = mesh->bvh.numNodes;
@@ -39,6 +42,7 @@ namespace Mirage
         geo.numVertices = mesh->vertices.size();
 
         geo.id = (unsigned long)mesh;
+        geo.meshIndex = -1; // resolved by the scene owner - see MeshGeometry::meshIndex
 
         return geo;
     }

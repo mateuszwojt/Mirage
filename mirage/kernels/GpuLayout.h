@@ -60,15 +60,21 @@ namespace Mirage
     // offsets into the scene's mega-buffers (see scene/SceneBuffers.slang).
     // hasUVs distinguishes "this mesh has no UV data" from "its UVs start at
     // buffer offset 0" (a legitimate real offset for the first mesh uploaded) -
-    // uvOffset alone can't disambiguate those two cases.
+    // uvOffset alone can't disambiguate those two cases. vertexOffsetEnd/
+    // hasMotion are the same pattern for deforming (2-keyframe) motion blur
+    // (Tier-1 feature 2) - hasMotion == 0 means the mesh is static and
+    // vertexOffsetEnd is meaningless (mirrors Mesh::HasMotion() on the CPU
+    // side). Fields appended, not interleaved - existing offsets unchanged.
     struct GpuMeshDescriptor
     {
         uint32_t vertexOffset, indexOffset, uvOffset, nodeOffset;
         uint32_t numVertices, numIndices, numNodes;
         float area;
         uint32_t hasUVs;
+        uint32_t vertexOffsetEnd;
+        uint32_t hasMotion;
     };
-    static_assert(sizeof(GpuMeshDescriptor) == 36, "GpuMeshDescriptor layout drifted");
+    static_assert(sizeof(GpuMeshDescriptor) == 44, "GpuMeshDescriptor layout drifted");
 
     // Precomputed on the host from Mirage::Camera + Options (mirrors
     // utils/Util.h's CameraSampler constructor output) - avoids porting

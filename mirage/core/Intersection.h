@@ -579,7 +579,7 @@ namespace Mirage
 
 	struct MeshQuery
 	{
-		CUDA_CALLABLE inline MeshQuery(const MeshGeometry &m, const ::Mirage::Vec3&origin, const ::Mirage::Vec3&dir) : mesh(m), rayOrigin(origin), rayDir(dir), closestT(FLT_MAX) {}
+		CUDA_CALLABLE inline MeshQuery(const MeshGeometry &m, const ::Mirage::Vec3&origin, const ::Mirage::Vec3&dir, float time) : mesh(m), rayOrigin(origin), rayDir(dir), rayTime(time), closestT(FLT_MAX) {}
 
 		CUDA_CALLABLE inline void operator()(int i)
 		{
@@ -590,9 +590,23 @@ namespace Mirage
 			int i1 = ::Mirage::fetchInt(mesh.indices, i * 3 + 1);
 			int i2 = ::Mirage::fetchInt(mesh.indices, i * 3 + 2);
 
-			const ::Mirage::Vec3 a = fetchVec3(mesh.positions, i0);
-			const ::Mirage::Vec3 b = fetchVec3(mesh.positions, i1);
-			const ::Mirage::Vec3 c = fetchVec3(mesh.positions, i2);
+			::Mirage::Vec3 a = fetchVec3(mesh.positions, i0);
+			::Mirage::Vec3 b = fetchVec3(mesh.positions, i1);
+			::Mirage::Vec3 c = fetchVec3(mesh.positions, i2);
+
+			// Deforming (2-keyframe) motion blur: lerp this triangle's
+			// vertices toward their end-of-shutter positions by rayTime,
+			// mirroring the rigid Primitive::startTransform/endTransform
+			// interpolation one level down, per-triangle instead of
+			// per-object. mesh.positionsEnd is only non-null when
+			// Mesh::verticesEnd was populated (see GeometryFromMesh) - a
+			// static mesh takes the exact same path as before this feature.
+			if (mesh.positionsEnd)
+			{
+				a = ::Mirage::Lerp(a, fetchVec3(mesh.positionsEnd, i0), rayTime);
+				b = ::Mirage::Lerp(b, fetchVec3(mesh.positionsEnd, i1), rayTime);
+				c = ::Mirage::Lerp(c, fetchVec3(mesh.positionsEnd, i2), rayTime);
+			}
 
 			float sign;
 			// if (IntersectRayTri(rayOrigin, rayDir, a, b, c, t, u, v, w, &n))
@@ -614,6 +628,7 @@ namespace Mirage
 		const MeshGeometry &mesh;
 		const ::Mirage::Vec3 rayOrigin;
 		const ::Mirage::Vec3 rayDir;
+		const float rayTime;
 
 		float closestT;
 		float closestU;
@@ -624,10 +639,10 @@ namespace Mirage
 		int closestTri;
 	};
 
-	CUDA_CALLABLE bool inline IntersectRayMesh(const MeshGeometry &mesh, const ::Mirage::Vec3&origin, const ::Mirage::Vec3&dir, float tmax, float &t, float &u, float &v, float &w, int &tri, ::Mirage::Vec3&triNormal)
+	CUDA_CALLABLE bool inline IntersectRayMesh(const MeshGeometry &mesh, const ::Mirage::Vec3&origin, const ::Mirage::Vec3&dir, float tmax, float rayTime, float &t, float &u, float &v, float &w, int &tri, ::Mirage::Vec3&triNormal)
 	{
 
-		MeshQuery query(mesh, origin, dir);
+		MeshQuery query(mesh, origin, dir, rayTime);
 
 		::Mirage::Vec3 rcpDir;
 		rcpDir.x = 1.0f / dir.x;
@@ -749,7 +764,9 @@ namespace Mirage
 	CUDA_CALLABLE bool inline IntersectRayMeshOld(const MeshGeometry &mesh, const ::Mirage::Vec3&origin, const ::Mirage::Vec3&dir, float tmax, float &t, float &u, float &v, float &w, int &tri, ::Mirage::Vec3&triNormal)
 	{
 
-		MeshQuery query(mesh, origin, dir);
+		// Legacy/unused (see QueryRayOld precedent above) - not motion-blur
+		// aware, always samples the start-of-shutter positions.
+		MeshQuery query(mesh, origin, dir, 0.0f);
 
 		QueryRay(mesh.nodes, query, origin, dir);
 
@@ -967,7 +984,7 @@ namespace Mirage
 			::Mirage::Vec3 triNormal;
 
 			// transform ray to mesh space
-			bool hit = IntersectRayMesh(p.mesh, localOrigin, localDir, FLT_MAX, t, u, v, w, tri, triNormal);
+			bool hit = IntersectRayMesh(p.mesh, localOrigin, localDir, FLT_MAX, ray.time, t, u, v, w, tri, triNormal);
 
 			if (hit)
 			{
