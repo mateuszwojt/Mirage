@@ -62,6 +62,7 @@ namespace Mirage
             g.roughnessTextureIndex = m.roughnessTextureIndex;
             g.metallicTextureIndex = m.metallicTextureIndex;
             g.opacityTextureIndex = m.opacityTextureIndex;
+            g.normalTextureIndex = m.normalTextureIndex;
             return g;
         }
     }
@@ -101,6 +102,11 @@ namespace Mirage
         // element (never indexed) when no mesh in the scene has motion, same
         // as every other CreateStructuredBuffer call below.
         ComPtr<IBuffer> positionsEndBuf;
+        // Tangent-space normal mapping (Tier-1 feature 5): per-vertex
+        // tangent mega-buffer, parallel to normalsBuf - padded to one dummy
+        // element (never indexed) when no mesh in the scene has tangent
+        // data, same as every other CreateStructuredBuffer call below.
+        ComPtr<IBuffer> tangentsBuf;
         ComPtr<IBuffer> materialsBuf, skyBuf;
         uint32_t numPrimitivesUploaded = 0;
 
@@ -416,6 +422,7 @@ namespace Mirage
             std::vector<GpuMeshDescriptor> meshDescs;
             std::vector<float3_> positions, normals; // defined below as plain float3
             std::vector<float3_> positionsEnd; // deforming motion blur, see GpuMeshDescriptor::hasMotion
+            std::vector<float3_> tangents; // normal mapping, see GpuMeshDescriptor::hasTangents
             std::vector<float2_> uvs;
             std::vector<int32_t> indices;
             std::vector<GpuBVHNode> meshBvhNodes;
@@ -434,6 +441,8 @@ namespace Mirage
                 desc.area = mesh->area;
                 desc.hasMotion = mesh->HasMotion() ? 1u : 0u;
                 desc.vertexOffsetEnd = (uint32_t)positionsEnd.size();
+                desc.hasTangents = mesh->HasTangents() ? 1u : 0u;
+                desc.tangentOffset = (uint32_t)tangents.size();
                 meshDescs.push_back(desc);
 
                 for (auto &v : mesh->vertices)
@@ -450,6 +459,11 @@ namespace Mirage
                 {
                     for (auto &v : mesh->verticesEnd)
                         positionsEnd.push_back({v.x, v.y, v.z});
+                }
+                if (mesh->HasTangents())
+                {
+                    for (auto &t : mesh->tangents)
+                        tangents.push_back({t.x, t.y, t.z});
                 }
             }
 
@@ -547,6 +561,7 @@ namespace Mirage
             meshBvhBuf = CreateStructuredBuffer(meshBvhNodes);
             positionsBuf = CreateStructuredBuffer(positions);
             positionsEndBuf = CreateStructuredBuffer(positionsEnd);
+            tangentsBuf = CreateStructuredBuffer(tangents);
             normalsBuf = CreateStructuredBuffer(normals);
             indicesBuf = CreateStructuredBuffer(indices);
             uvsBuf = CreateStructuredBuffer(uvs);
@@ -623,6 +638,7 @@ namespace Mirage
                 cursor["g_MeshBVHNodes"].setBinding(meshBvhBuf);
                 cursor["g_Positions"].setBinding(positionsBuf);
                 cursor["g_PositionsEnd"].setBinding(positionsEndBuf);
+                cursor["g_Tangents"].setBinding(tangentsBuf);
                 cursor["g_Normals"].setBinding(normalsBuf);
                 cursor["g_Indices"].setBinding(indicesBuf);
 
@@ -724,6 +740,7 @@ namespace Mirage
                 cursor["g_MeshBVHNodes"].setBinding(meshBvhBuf);
                 cursor["g_Positions"].setBinding(positionsBuf);
                 cursor["g_PositionsEnd"].setBinding(positionsEndBuf);
+                cursor["g_Tangents"].setBinding(tangentsBuf);
                 cursor["g_Normals"].setBinding(normalsBuf);
                 cursor["g_Indices"].setBinding(indicesBuf);
                 cursor["g_UVs"].setBinding(uvsBuf);
@@ -857,6 +874,7 @@ namespace Mirage
                 cursor["g_MeshBVHNodes"].setBinding(meshBvhBuf);
                 cursor["g_Positions"].setBinding(positionsBuf);
                 cursor["g_PositionsEnd"].setBinding(positionsEndBuf);
+                cursor["g_Tangents"].setBinding(tangentsBuf);
                 cursor["g_Normals"].setBinding(normalsBuf);
                 cursor["g_Indices"].setBinding(indicesBuf);
                 cursor["g_UVs"].setBinding(uvsBuf);

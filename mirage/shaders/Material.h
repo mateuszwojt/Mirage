@@ -38,6 +38,7 @@ namespace Mirage
 			roughnessTextureIndex = -1;
 			metallicTextureIndex = -1;
 			opacityTextureIndex = -1;
+			normalTextureIndex = -1;
 		};
 
 		CUDA_CALLABLE inline float GetIndexOfRefraction() const
@@ -87,5 +88,13 @@ namespace Mirage
 		int roughnessTextureIndex;
 		int metallicTextureIndex;
 		int opacityTextureIndex; // -1 = none, use `opacity` scalar as-is; alpha channel of the bound texture
+
+		// -1 = none, no normal perturbation. Tangent-space normal map -
+		// requires the hit mesh to have tangent data (Mesh::HasTangents());
+		// silently has no effect otherwise (same "safe no-op, not a crash"
+		// convention as the other texture slots on a UV-less primitive).
+		// Deliberately a new field, not a repurposing of the dead
+		// bumpMap/bump/bumpTile fields below - see NormalMapping.h.
+		int normalTextureIndex;
 	};
 }

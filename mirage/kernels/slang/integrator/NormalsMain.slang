@@ -34,7 +34,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 n;
     int primIndex;
     float2 uv; // unused - eNormals mode never shades a hit
-    if (Trace(origin, dir, 1.0f, frame.numPrimitives, t, n, primIndex, uv))
+    float3 tangent; // unused - eNormals mode never shades a hit
+    if (Trace(origin, dir, 1.0f, frame.numPrimitives, t, n, primIndex, uv, tangent))
     {
         float3 color = n * 0.5f + 0.5f;
         g_Output[pixelIndex] = float4(color, 1.0f);

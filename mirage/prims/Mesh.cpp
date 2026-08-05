@@ -54,6 +54,57 @@ namespace Mirage
             normals[i] = SafeNormalize(normals[i]);
     }
 
+    void Mesh::ComputeTangents()
+    {
+        tangents.resize(0);
+
+        if (uvs.empty())
+            return; // no UV data - tangent space is undefined
+
+        if (normals.size() != vertices.size())
+            return; // CalculateNormals() must run first - see header comment
+
+        tangents.resize(vertices.size(), Vec3(0.0f));
+
+        int numTris = indices.size() / 3;
+
+        for (int i = 0; i < numTris; ++i)
+        {
+            int a = indices[i * 3 + 0];
+            int b = indices[i * 3 + 1];
+            int c = indices[i * 3 + 2];
+
+            Vec3 edge1 = vertices[b] - vertices[a];
+            Vec3 edge2 = vertices[c] - vertices[a];
+            Vec2 deltaUV1 = uvs[b] - uvs[a];
+            Vec2 deltaUV2 = uvs[c] - uvs[a];
+
+            float denom = deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y;
+            if (fabsf(denom) < 1.e-12f)
+                continue; // degenerate/zero-area UV triangle - skip, leave its vertices' other-triangle contributions alone
+
+            float f = 1.0f / denom;
+            Vec3 tangent = (edge1 * deltaUV2.y - edge2 * deltaUV1.y) * f;
+
+            tangents[a] += tangent;
+            tangents[b] += tangent;
+            tangents[c] += tangent;
+        }
+
+        // Per-vertex Gram-Schmidt orthonormalize against the vertex normal -
+        // accumulated face tangents aren't exactly orthogonal to the
+        // (separately smoothed) vertex normal in general. A tangent that
+        // degenerates to ~zero (e.g. every incident triangle had a
+        // degenerate UV) falls back to SafeNormalize's zero-vector default,
+        // matching CalculateNormals()'s own SafeNormalize(normals[i]) call.
+        for (size_t i = 0; i < tangents.size(); ++i)
+        {
+            const Vec3 &n = normals[i];
+            Vec3 t = tangents[i] - n * Dot(n, tangents[i]);
+            tangents[i] = SafeNormalize(t);
+        }
+    }
+
     void Mesh::rebuildBVH()
     {
         const int numTris = indices.size() / 3;
@@ -155,6 +206,11 @@ namespace Mirage
         // bake (e.g. via Normalize()).
         for (size_t i = 0; i < verticesEnd.size(); ++i)
             verticesEnd[i] = TransformPoint(m, verticesEnd[i]);
+
+        // Same reasoning for tangents (if ComputeTangents() already ran) -
+        // a direction vector, transformed the same way as normals.
+        for (size_t i = 0; i < tangents.size(); ++i)
+            tangents[i] = TransformVector(m, tangents[i]);
     }
 
     void Mesh::GetBounds(Vec3 &outMinExtents, Vec3 &outMaxExtents) const

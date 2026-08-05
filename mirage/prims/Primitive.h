@@ -38,6 +38,12 @@ namespace Mirage
         // mesh (Mesh::HasMotion() == false). See GeometryFromMesh.
         const Vec3 *positionsEnd;
 
+        // Tangent-space normal mapping: per-vertex tangent, parallel to
+        // `positions` (same index space) - nullptr when the mesh has no
+        // tangent basis (Mesh::HasTangents() == false, e.g. no UV data or
+        // ComputeTangents() was never called). See GeometryFromMesh.
+        const Vec3 *tangents;
+
         int numVertices;
         int numIndices;
         int numNodes;

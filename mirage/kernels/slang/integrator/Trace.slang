@@ -16,8 +16,10 @@ import Random;
 // not optional/defaultable - Slang has no equivalent of a nullable out
 // pointer - so every call site (including SampleLights.slang's two shadow-ray
 // calls, which don't need the value) must pass a local to receive it.
+// outTangent follows the same convention, gated on tangent data instead of
+// UV data (desc.hasTangents).
 bool Trace(float3 rayOrigin, float3 rayDir, float rayTime, uint numScenePrims,
-           out float outT, out float3 outNormal, out int outPrimIndex, out float2 outUV)
+           out float outT, out float3 outNormal, out int outPrimIndex, out float2 outUV, out float3 outTangent)
 {
     float3 rcpDir = float3(1.0f / rayDir.x, 1.0f / rayDir.y, 1.0f / rayDir.z);
 
@@ -28,13 +30,14 @@ bool Trace(float3 rayOrigin, float3 rayDir, float rayTime, uint numScenePrims,
     float minT = 3.402823466e+38f;
     float3 closestNormal = float3(0.0f);
     float2 closestUV = float2(0.0f);
+    float3 closestTangent = float3(0.0f);
     int closestPrim = -1;
 
     // Single-primitive scenes still get a valid (degenerate) BVH from the host
     // builder, but guard here too in case numScenePrims == 0 is ever reached.
     if (numScenePrims == 0)
     {
-        outT = 0.0f; outNormal = float3(0.0f); outPrimIndex = -1; outUV = float2(0.0f);
+        outT = 0.0f; outNormal = float3(0.0f); outPrimIndex = -1; outUV = float2(0.0f); outTangent = float3(0.0f);
         return false;
     }
 
@@ -51,13 +54,15 @@ bool Trace(float3 rayOrigin, float3 rayDir, float rayTime, uint numScenePrims,
             float t;
             float3 n;
             float2 uv;
-            if (PrimitiveIntersect(prim, rayOrigin, rayDir, rayTime, t, n, uv))
+            float3 tangent;
+            if (PrimitiveIntersect(prim, rayOrigin, rayDir, rayTime, t, n, uv, tangent))
             {
                 if (t < minT && t > 0.0f)
                 {
                     minT = t;
                     closestNormal = n;
                     closestUV = uv;
+                    closestTangent = tangent;
                     closestPrim = primIndex;
                 }
             }
@@ -82,6 +87,7 @@ bool Trace(float3 rayOrigin, float3 rayDir, float rayTime, uint numScenePrims,
     outNormal = FaceForward(closestNormal, -rayDir);
     outPrimIndex = closestPrim;
     outUV = closestUV;
+    outTangent = closestTangent;
     return closestPrim >= 0;
 }
 
@@ -97,7 +103,7 @@ bool Trace(float3 rayOrigin, float3 rayDir, float rayTime, uint numScenePrims,
 static const int kMaxCutoutRetries = 4;
 
 bool TraceWithCutout(float3 rayOrigin, float3 rayDir, float rayTime, uint numScenePrims, inout Random rand,
-                      out float outT, out float3 outNormal, out int outPrimIndex, out float2 outUV)
+                      out float outT, out float3 outNormal, out int outPrimIndex, out float2 outUV, out float3 outTangent)
 {
     // outT must end up measured from the ORIGINAL ray origin the caller
     // passed in, not from whatever retry-shifted origin the final accepted
@@ -113,7 +119,7 @@ bool TraceWithCutout(float3 rayOrigin, float3 rayDir, float rayTime, uint numSce
     for (int i = 0; i < kMaxCutoutRetries; ++i)
     {
         float localT;
-        if (!Trace(rayOrigin, rayDir, rayTime, numScenePrims, localT, outNormal, outPrimIndex, outUV))
+        if (!Trace(rayOrigin, rayDir, rayTime, numScenePrims, localT, outNormal, outPrimIndex, outUV, outTangent))
             return false;
 
         GpuMaterial hitMaterial = g_Materials[g_Primitives[outPrimIndex].materialIndex];

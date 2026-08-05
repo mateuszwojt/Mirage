@@ -38,6 +38,11 @@ struct GpuMeshDescriptor
     // on the CPU side.
     uint vertexOffsetEnd;
     uint hasMotion;
+    // Tangent-space normal mapping (Tier-1 feature 5): same disambiguation
+    // pattern again - hasTangents == 0 means the mesh has no tangent basis
+    // and tangentOffset is meaningless. Mirrors Mesh::HasTangents().
+    uint tangentOffset;
+    uint hasTangents;
 };
 
 uniform StructuredBuffer<GpuPrimitive> g_Primitives;
@@ -47,6 +52,7 @@ uniform StructuredBuffer<BVHNode> g_MeshBVHNodes;
 uniform StructuredBuffer<float3> g_Positions;
 uniform StructuredBuffer<float3> g_PositionsEnd;
 uniform StructuredBuffer<float3> g_Normals;
+uniform StructuredBuffer<float3> g_Tangents;
 uniform StructuredBuffer<int> g_Indices;
 uniform StructuredBuffer<float2> g_UVs;
 uniform StructuredBuffer<GpuMaterial> g_Materials;

@@ -64,7 +64,10 @@ namespace Mirage
     // hasMotion are the same pattern for deforming (2-keyframe) motion blur
     // (Tier-1 feature 2) - hasMotion == 0 means the mesh is static and
     // vertexOffsetEnd is meaningless (mirrors Mesh::HasMotion() on the CPU
-    // side). Fields appended, not interleaved - existing offsets unchanged.
+    // side). tangentOffset/hasTangents are the same pattern again for
+    // tangent-space normal mapping (Tier-1 feature 5), mirroring
+    // Mesh::HasTangents(). Fields appended, not interleaved - existing
+    // offsets unchanged.
     struct GpuMeshDescriptor
     {
         uint32_t vertexOffset, indexOffset, uvOffset, nodeOffset;
@@ -73,8 +76,10 @@ namespace Mirage
         uint32_t hasUVs;
         uint32_t vertexOffsetEnd;
         uint32_t hasMotion;
+        uint32_t tangentOffset;
+        uint32_t hasTangents;
     };
-    static_assert(sizeof(GpuMeshDescriptor) == 44, "GpuMeshDescriptor layout drifted");
+    static_assert(sizeof(GpuMeshDescriptor) == 52, "GpuMeshDescriptor layout drifted");
 
     // Precomputed on the host from Mirage::Camera + Options (mirrors
     // utils/Util.h's CameraSampler constructor output) - avoids porting
@@ -112,7 +117,8 @@ namespace Mirage
 
     // Mirrors the Disney-BSDF-relevant fields of shaders/Material.h, plus (as
     // of M8) the three texture-index fields added there, plus (Tier-1
-    // "opacity/cutout transparency") opacity/opacityTextureIndex. See
+    // "opacity/cutout transparency") opacity/opacityTextureIndex, plus
+    // (Tier-1 "normal mapping") normalTextureIndex. See
     // kernels/slang/shading/Material.slang for the byte-identical Slang struct.
     // Fields appended, not interleaved - existing field offsets are unchanged.
     struct GpuMaterial
@@ -139,8 +145,9 @@ namespace Mirage
         int32_t roughnessTextureIndex; // -1 = none, use roughness as-is
         int32_t metallicTextureIndex;  // -1 = none, use metallic as-is
         int32_t opacityTextureIndex;   // -1 = none, use `opacity` scalar as-is
+        int32_t normalTextureIndex;    // -1 = none, no normal perturbation - see NormalMapping.slang
     };
-    static_assert(sizeof(GpuMaterial) == 36 + 48 + 12 + 8, "GpuMaterial layout drifted");
+    static_assert(sizeof(GpuMaterial) == 36 + 48 + 12 + 12, "GpuMaterial layout drifted");
 
     // M2 validation-only: one BSDF Eval/Pdf/Sample test case, mirrors
     // kernels/slang/shading/BsdfTestMain.slang's BsdfTestCase.
@@ -153,7 +160,7 @@ namespace Mirage
         float lx, ly, lz;
         uint32_t seed;
     };
-    static_assert(sizeof(GpuBsdfTestCase) == 104 + 8 + 36 + 4, "GpuBsdfTestCase layout drifted");
+    static_assert(sizeof(GpuBsdfTestCase) == 108 + 8 + 36 + 4, "GpuBsdfTestCase layout drifted");
 
     // M2 validation-only: BSDF Eval/Pdf/Sample results for one test case.
     struct GpuBsdfTestResult

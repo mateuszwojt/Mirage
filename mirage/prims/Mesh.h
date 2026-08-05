@@ -35,6 +35,14 @@ namespace Mirage
 		// motion (what this feature targets).
 		std::vector<Vec3> verticesEnd;
 
+		// Tangent-space normal mapping: per-vertex tangent, parallel to
+		// vertices/normals above (same index space). Empty (the default)
+		// means "no tangent-space basis" - every existing mesh-authoring
+		// path that never calls ComputeTangents() keeps rendering exactly
+		// as before this feature (normalTextureIndex is simply never
+		// sampled for such a mesh - see Renderer.cpp's shadedMaterial hook).
+		std::vector<Vec3> tangents;
+
 		std::string meshName;
 		float area;
 
@@ -44,11 +52,27 @@ namespace Mirage
 		// out-of-bounds read.
 		bool HasMotion() const { return !verticesEnd.empty() && verticesEnd.size() == vertices.size(); }
 
+		// True only when ComputeTangents() successfully populated one
+		// tangent per vertex - same "malformed data degrades safely"
+		// convention as HasMotion().
+		bool HasTangents() const { return !tangents.empty() && tangents.size() == vertices.size(); }
+
 		void AddMesh(Mesh &m);
 
 		void DuplicateVertex(size_t i);
 
 		void CalculateNormals();
+
+		// Per-vertex tangent-space basis for normal mapping, derived from
+		// per-triangle UV derivatives (the standard Lengyel/"MikkTSpace-ish"
+		// construction) then Gram-Schmidt-orthonormalized against the
+		// already-computed vertex normal - requires CalculateNormals() to
+		// have run first (normals.size() must already match vertices.size();
+		// this bails out, leaving tangents empty/HasTangents()==false,
+		// otherwise). No-ops (leaves tangents empty) if the mesh has no UV
+		// data - tangent space is undefined without a UV parameterization.
+		void ComputeTangents();
+
 		void Transform(const Mat44 &m);
 		void Normalize(float s = 1.0f); // scale so bounds in any dimension equals s and lower bound = (0,0,0)
 

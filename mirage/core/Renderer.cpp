@@ -3,6 +3,7 @@
 #include "mirage/core/Sampler.h"
 #include "mirage/shaders/Disney.h"
 #include "mirage/shaders/TextureSampling.h"
+#include "mirage/shaders/NormalMapping.h"
 #include "mirage/utils/Util.h"
 
 #define kBsdfSamples 1.0f
@@ -48,8 +49,9 @@ namespace Mirage
 	// PrimitiveIntersect's outUV comment in Intersection.h). Defaulted so
 	// existing shadow-ray/visibility-only callers (which never shade the hit,
 	// only test occlusion - e.g. SampleLights' two Trace() calls) don't need
-	// to pass or care about it.
-	inline bool Trace(const Scene &scene, const Ray &ray, float &outT, Vec3 &outNormal, const Primitive **outPrimitive, Vec2 *outUV = nullptr)
+	// to pass or care about it. outTangent follows the same convention,
+	// gated on tangent data instead of UV data (Mesh::HasTangents()).
+	inline bool Trace(const Scene &scene, const Ray &ray, float &outT, Vec3 &outNormal, const Primitive **outPrimitive, Vec2 *outUV = nullptr, Vec3 *outTangent = nullptr)
 	{
 
 #if USE_SCENE_BVH
@@ -59,6 +61,7 @@ namespace Mirage
 			float minT;
 			Vec3 closestNormal;
 			Vec2 closestUV;
+			Vec3 closestTangent;
 			const Primitive *closestPrimitive;
 
 			Ray ray;
@@ -73,10 +76,11 @@ namespace Mirage
 				float t;
 				Vec3 n, ns;
 				Vec2 uv;
+				Vec3 tangent;
 
 				const Primitive &primitive = scene.primitives[index];
 
-				if (PrimitiveIntersect(primitive, ray, t, &n, &uv))
+				if (PrimitiveIntersect(primitive, ray, t, &n, &uv, &tangent))
 				{
 					if (t < minT && t > 0.0f)
 					{
@@ -84,6 +88,7 @@ namespace Mirage
 						closestPrimitive = &primitive;
 						closestNormal = n;
 						closestUV = uv;
+						closestTangent = tangent;
 					}
 				}
 			}
@@ -97,6 +102,8 @@ namespace Mirage
 		*outPrimitive = callback.closestPrimitive;
 		if (outUV)
 			*outUV = callback.closestUV;
+		if (outTangent)
+			*outTangent = callback.closestTangent;
 
 		return callback.closestPrimitive != nullptr;
 
@@ -107,16 +114,18 @@ namespace Mirage
 		const Primitive *closestPrimitive = nullptr;
 		Vec3 closestNormal(0.0f);
 		Vec2 closestUV(0.0f);
+		Vec3 closestTangent(0.0f);
 
 		for (Scene::PrimitiveArray::const_iterator iter = scene.primitives.begin(), end = scene.primitives.end(); iter != end; ++iter)
 		{
 			float t;
 			Vec3 n, ns;
 			Vec2 uv;
+			Vec3 tangent;
 
 			const Primitive &primitive = *iter;
 
-			if (PrimitiveIntersect(primitive, ray, t, &n, &uv))
+			if (PrimitiveIntersect(primitive, ray, t, &n, &uv, &tangent))
 			{
 				if (t < minT && t > 0.0f)
 				{
@@ -124,6 +133,7 @@ namespace Mirage
 					closestPrimitive = &primitive;
 					closestNormal = n;
 					closestUV = uv;
+					closestTangent = tangent;
 				}
 			}
 		}
@@ -133,6 +143,8 @@ namespace Mirage
 		*outPrimitive = closestPrimitive;
 		if (outUV)
 			*outUV = closestUV;
+		if (outTangent)
+			*outTangent = closestTangent;
 
 		return closestPrimitive != nullptr;
 
@@ -149,7 +161,7 @@ namespace Mirage
 	// `rand`, so every call site swaps in directly. Bounded by
 	// kMaxCutoutRetries; if that budget runs out, the last-tested hit is
 	// reported as-is (treated as opaque) rather than retried forever.
-	inline bool TraceWithCutout(const Scene &scene, Ray ray, float &outT, Vec3 &outNormal, const Primitive **outPrimitive, Random &rand, Vec2 *outUV = nullptr)
+	inline bool TraceWithCutout(const Scene &scene, Ray ray, float &outT, Vec3 &outNormal, const Primitive **outPrimitive, Random &rand, Vec2 *outUV = nullptr, Vec3 *outTangent = nullptr)
 	{
 		// Opacity texture sampling needs a UV regardless of whether the
 		// caller itself wants one back (most callers here are shadow rays,
@@ -170,7 +182,7 @@ namespace Mirage
 		for (int i = 0; i < kMaxCutoutRetries; ++i)
 		{
 			float localT;
-			if (!Trace(scene, ray, localT, outNormal, outPrimitive, uv))
+			if (!Trace(scene, ray, localT, outNormal, outPrimitive, uv, outTangent))
 				return false;
 
 			const Material &mat = ResolveMaterial(scene, (*outPrimitive)->materialIndex);
@@ -345,6 +357,7 @@ namespace Mirage
 		float t = 0.0f;
 		Vec3 n;
 		Vec2 hitUV(0.0f);
+		Vec3 hitTangent(0.0f);
 		const Primitive *hit;
 
 		float bsdfPdf = 1.0f;
@@ -352,7 +365,7 @@ namespace Mirage
 		for (int i = 0; i < maxDepth; ++i)
 		{
 			// find closest hit
-			if (TraceWithCutout(scene, Ray(rayOrigin, rayDir, rayTime), t, n, &hit, rand, &hitUV))
+			if (TraceWithCutout(scene, Ray(rayOrigin, rayDir, rayTime), t, n, &hit, rand, &hitUV, &hitTangent))
 			{
 				// Shaded material: a per-hit copy of the resolved Material with
 				// color/roughness/metallic overridden from sampled textures
@@ -383,6 +396,20 @@ namespace Mirage
 						shadedMaterial.metallic = SampleTextureR(*tex, hitUV);
 				}
 				const Material &hitMaterial = shadedMaterial;
+
+				// Perturb the shading normal in place - every subsequent use
+				// of `n` this iteration (AOV capture, SampleLights,
+				// BSDFSample/BSDFEval) sees the bump-mapped normal, same
+				// "build once, reuse everywhere" reasoning as shadedMaterial
+				// above. Only fires for eMesh hits with both a bound normal
+				// map and tangent data (hitTangent is only ever populated in
+				// that case - see PrimitiveIntersect's outTangent comment).
+				if (hitMaterial.normalTextureIndex >= 0)
+				{
+					const Texture *tex = scene.GetTexture(hitMaterial.normalTextureIndex);
+					if (tex)
+						n = ApplyNormalMap(n, hitTangent, SampleTextureRGB(*tex, hitUV));
+				}
 
 				float outEta;
 				Vec3 outAbsorption;

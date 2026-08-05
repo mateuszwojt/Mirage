@@ -131,14 +131,16 @@ bool IntersectRayMesh(GpuMeshDescriptor desc, float3 origin, float3 dir, float t
 // left at float2(0.0f) otherwise, mirroring the CPU's PrimitiveIntersect
 // outUV convention (Intersection.h) exactly. Sphere/plane hits never
 // populate outUV - no procedural UV for non-mesh primitives in this
-// milestone (see the plan's Deferrals).
+// milestone (see the plan's Deferrals). outTangent follows the same
+// convention, gated on desc.hasTangents != 0 instead of desc.hasUVs.
 bool PrimitiveIntersect(GpuPrimitive prim, float3 rayOrigin, float3 rayDir, float rayTime,
-                         out float outT, out float3 outNormal, out float2 outUV)
+                         out float outT, out float3 outNormal, out float2 outUV, out float3 outTangent)
 {
     GpuTransform transform = GpuTransform_Interpolate(prim.startTransform, prim.endTransform, rayTime);
     outT = 0.0f;
     outNormal = float3(0.0f);
     outUV = float2(0.0f);
+    outTangent = float3(0.0f);
 
     if (prim.type == 0) // sphere
     {
@@ -201,6 +203,18 @@ bool PrimitiveIntersect(GpuPrimitive prim, float3 rayOrigin, float3 rayDir, floa
                 float2 uv1 = g_UVs[desc.uvOffset + i1];
                 float2 uv2 = g_UVs[desc.uvOffset + i2];
                 outUV = u * uv0 + v * uv1 + w * uv2;
+            }
+
+            // Same u/v/w barycentric weights again, applied to per-vertex
+            // tangents - mirrors the outUV block immediately above exactly,
+            // gated on tangent data instead of UV data.
+            if (desc.hasTangents != 0)
+            {
+                float3 t1 = g_Tangents[desc.tangentOffset + i0];
+                float3 t2 = g_Tangents[desc.tangentOffset + i1];
+                float3 t3 = g_Tangents[desc.tangentOffset + i2];
+                float3 smoothTangent = u * t1 + v * t2 + w * t3;
+                outTangent = SafeNormalize(GpuTransform_TransformVector(transform, smoothTangent));
             }
         }
         return hit;
