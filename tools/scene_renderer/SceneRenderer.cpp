@@ -24,6 +24,8 @@
 #include "mirage/math/Vec3.h"
 #include "mirage/math/Transform.h"
 #include "mirage/core/Renderer.h"
+#include "mirage/core/RenderSettings.h"
+#include "mirage/filter/NLM.h"
 #include "mirage/math/Color.h"
 #include "mirage/lights/Skylight.h"
 
@@ -82,6 +84,54 @@ std::vector<std::string> split(const std::string &s, char delimiter)
 bool startsWith(const std::string &str, const std::string &prefix)
 {
     return str.size() >= prefix.size() && str.compare(0, prefix.size(), prefix) == 0;
+}
+
+// Parses a comma-separated AOV name list ("depth,normal,albedo") into an
+// AovType bitmask (mirage/core/Renderer.h). Returns false (leaving *outMask
+// untouched) on any unrecognized name. Shared between the --aovs CLI flag
+// and a scene file's `render_settings { aovs ... }` key (see
+// RenderSettingsDefinition/parseRenderSettingsProperty below) so both stay
+// in sync with exactly the same recognized names.
+bool ParseAovMask(const std::string &commaList, uint32_t *outMask)
+{
+    uint32_t mask = 0;
+    std::istringstream stream(commaList);
+    std::string name;
+    while (std::getline(stream, name, ','))
+    {
+        name = trim(name);
+        if (name == "depth")
+            mask |= Mirage::kAovDepth;
+        else if (name == "normal")
+            mask |= Mirage::kAovNormal;
+        else if (name == "primid")
+            mask |= Mirage::kAovPrimId;
+        else if (name == "albedo")
+            mask |= Mirage::kAovAlbedo;
+        else
+            return false;
+    }
+    *outMask = mask;
+    return true;
+}
+
+// Parses a --view-transform-style name ("filmic"/"aces"/"srgb"/"none") into
+// a ViewTransform (mirage/utils/Util.h). Returns false (leaving *outVt
+// untouched) on any unrecognized name. Same sharing rationale as
+// ParseAovMask above.
+bool ParseViewTransformName(const std::string &value, Mirage::ViewTransform *outVt)
+{
+    if (value == "filmic")
+        *outVt = Mirage::ViewTransform::eFilmic;
+    else if (value == "aces")
+        *outVt = Mirage::ViewTransform::eAcesLike;
+    else if (value == "srgb")
+        *outVt = Mirage::ViewTransform::eSrgbDisplay;
+    else if (value == "none")
+        *outVt = Mirage::ViewTransform::eNone;
+    else
+        return false;
+    return true;
 }
 
 // Loads a UDIM tile set into one composited atlas Texture (Tier-2 "UDIM") -
@@ -614,6 +664,39 @@ private:
     float height = 1.0f; // eRect only
 };
 
+// One `render_settings { }` scene-file block (docs/PRODUCTION_READINESS.md's
+// Tier 3 "no render-settings-map / multi-product batch pipeline" finding) -
+// mirrors CameraDefinition's shape (plain setters, defaults matching the
+// pre-existing CLI-flag defaults). Multiple render_settings blocks are
+// grouped into mirage/core/RenderSettings.h's RenderPass/RenderProduct model
+// by BuildRenderSettingsFromDefs() in main() below, not here - a single
+// definition doesn't know which other definitions it shares a pass with.
+class RenderSettingsDefinition
+{
+public:
+    RenderSettingsDefinition() {}
+
+    void setName(const std::string &value) { name = value; }
+    void setOutput(const std::string &value) { output = value; }
+    void setAovs(const std::string &value) { aovsRaw = value; }
+    void setViewTransform(const std::string &value) { viewTransformRaw = value; }
+    // -1 sentinel = "not set in this block" - BuildRenderSettingsFromDefs
+    // falls back to the CLI positional width/height/samples for any block
+    // that omits them, same as a scene file with no render_settings blocks
+    // at all.
+    void setSamples(int value) { samples = value; }
+    void setWidth(int value) { width = value; }
+    void setHeight(int value) { height = value; }
+
+    std::string name = "beauty";
+    std::string output;
+    std::string aovsRaw;                          // raw comma-list, "" = beauty only (aovMask 0)
+    std::string viewTransformRaw = "filmic";
+    int samples = -1;
+    int width = -1;
+    int height = -1;
+};
+
 // Scene parser class
 class SceneParser
 {
@@ -642,6 +725,7 @@ public:
         CameraDefinition currentCamera;
         LightDefinition currentLight;
         SkyDefinition currentSky;
+        RenderSettingsDefinition currentRenderSettings;
         bool inBlock = false;
         bool waitingForBlockStart = false;
 
@@ -705,6 +789,13 @@ public:
                     hasSky = true;
                     currentSky = SkyDefinition();
                 }
+                else if (currentSection == "render_settings") {
+                    // Repeatable, like primitive - each block is one output
+                    // product (see RenderSettingsDefinition/main() below).
+                    MIRAGE_LOG_DEBUG("Debug: Adding render_settings block to list");
+                    renderSettingsDefs.push_back(currentRenderSettings);
+                    currentRenderSettings = RenderSettingsDefinition();
+                }
 
                 currentSection = "";
             } 
@@ -750,6 +841,13 @@ public:
                         currentSky = SkyDefinition();
                         waitingForBlockStart = true;
                     }
+                    else if (parts[0] == "render_settings") {
+                        currentSection = "render_settings";
+                        MIRAGE_LOG_DEBUG("Debug: Starting render_settings section");
+
+                        currentRenderSettings = RenderSettingsDefinition();
+                        waitingForBlockStart = true;
+                    }
                 }
             }
             else if (inBlock) {
@@ -771,9 +869,12 @@ public:
                 else if (currentSection == "sky") {
                     parseSkyProperty(currentSky, parts);
                 }
+                else if (currentSection == "render_settings") {
+                    parseRenderSettingsProperty(currentRenderSettings, parts);
+                }
             }
         }
-        
+
         // If we're still in a block at the end of the file, handle it
         if (inBlock && currentSection == "primitive") {
             MIRAGE_LOG_DEBUG("Debug: Adding final primitive to list");
@@ -792,6 +893,10 @@ public:
             MIRAGE_LOG_DEBUG("Debug: Setting final scene sky");
             sky = currentSky;
             hasSky = true;
+        }
+        else if (inBlock && currentSection == "render_settings") {
+            MIRAGE_LOG_DEBUG("Debug: Adding final render_settings block to list");
+            renderSettingsDefs.push_back(currentRenderSettings);
         }
 
 
@@ -868,6 +973,11 @@ public:
             MIRAGE_LOG_ERROR("Unknown exception while building scene");
         }
     }
+
+    // The scene file's parsed render_settings { } blocks (possibly empty -
+    // most scene files have none, see main()'s fallback to
+    // MakeLegacyRenderSettings when this is empty).
+    const std::vector<RenderSettingsDefinition> &GetRenderSettingsDefs() const { return renderSettingsDefs; }
 
 private:
     void parseMaterialProperty(const std::string &materialName, const std::vector<std::string> &parts)
@@ -1116,6 +1226,48 @@ private:
         }
     }
 
+    // Recognized keys: name, output, aovs <comma-list>, view_transform,
+    // samples, width, height - see RenderSettingsDefinition's field comments
+    // and main()'s BuildRenderSettingsFromDefs() for how these get grouped
+    // into RenderPass/RenderProduct. aovs/view_transform values aren't
+    // validated here (ParseAovMask/ParseViewTransformName failures are
+    // reported once, at grouping time in main(), where the error message can
+    // also name which render_settings block - by its `name` key - triggered
+    // it).
+    void parseRenderSettingsProperty(RenderSettingsDefinition &rs, const std::vector<std::string> &parts) {
+        if (parts.empty()) return;
+
+        std::string property = parts[0];
+        MIRAGE_LOG_DEBUG("Debug: Parsing render_settings property: {}", property);
+
+        try {
+            if (property == "name" && parts.size() >= 2) {
+                rs.setName(parts[1]);
+            }
+            else if (property == "output" && parts.size() >= 2) {
+                rs.setOutput(parts[1]);
+            }
+            else if (property == "aovs" && parts.size() >= 2) {
+                rs.setAovs(parts[1]);
+            }
+            else if (property == "view_transform" && parts.size() >= 2) {
+                rs.setViewTransform(parts[1]);
+            }
+            else if (property == "samples" && parts.size() >= 2) {
+                rs.setSamples(std::stoi(parts[1]));
+            }
+            else if (property == "width" && parts.size() >= 2) {
+                rs.setWidth(std::stoi(parts[1]));
+            }
+            else if (property == "height" && parts.size() >= 2) {
+                rs.setHeight(std::stoi(parts[1]));
+            }
+        }
+        catch (const std::exception& e) {
+            MIRAGE_LOG_ERROR("Exception while parsing render_settings property: {}", e.what());
+        }
+    }
+
     std::map<std::string, MaterialDefinition> materials;
     std::vector<PrimitiveDefinition> primitives;
     std::vector<LightDefinition> lights;
@@ -1123,6 +1275,10 @@ private:
     bool hasCamera = false;
     SkyDefinition sky;
     bool hasSky = false;
+    // Empty (the common case) means the scene file had no render_settings
+    // blocks at all - main() falls back to MakeLegacyRenderSettings() using
+    // the positional CLI args + --aovs/--view-transform/--denoise flags.
+    std::vector<RenderSettingsDefinition> renderSettingsDefs;
     // The .tin file's own directory, set by parse() - albedoMap/roughnessMap/
     // metallicMap paths are resolved relative to this, not the process's
     // current working directory.
@@ -1263,6 +1419,191 @@ bool WriteMultiLayerExr(const std::string &path, const Color *beauty, const AovB
     return true;
 }
 
+// Writes one RenderProduct's file from its RenderPass's completed shared
+// beauty/AOV buffers - chooses EXR (multi-layer if the product requested
+// any AOVs, single-layer beauty-only otherwise) or an LDR format based on
+// outputPath's extension, the same logic the pre-multi-product code had
+// inline in main(). EXR output is always raw/untonemapped (product's
+// viewTransform is intentionally not applied there) - matches WriteExr's
+// existing documented convention of preserving full dynamic range; only LDR
+// output routes through ApplyViewTransform(product.viewTransform).
+bool WriteRenderProduct(const RenderProduct &product, const Color *beauty, const AovBuffers &aovs, int width, int height,
+                         float exposure)
+{
+    // Local copy, not a reference - the "unrecognized extension" fallback
+    // below rewrites it (e.g. "out.foo" -> "out.foo.png").
+    std::string outputFile = product.outputPath;
+    std::string extension = outputFile.substr(outputFile.find_last_of(".") + 1);
+
+    if (extension == "exr")
+    {
+        if (product.aovMask != 0)
+        {
+            MIRAGE_LOG_DEBUG("Debug: Writing multi-layer float EXR output for product '{}' (beauty + AOVs)", product.name);
+            return WriteMultiLayerExr(outputFile, beauty, aovs, product.aovMask, width, height);
+        }
+        MIRAGE_LOG_DEBUG("Debug: Writing float EXR output for product '{}'", product.name);
+        return WriteExr(outputFile, beauty, width, height);
+    }
+
+    if (product.aovMask != 0)
+    {
+        // AOVs need per-channel layers, which only EXR supports here -
+        // matches WriteMultiLayerExr's doc comment. Beauty still writes
+        // normally below; the requested AOVs are just silently dropped
+        // from a non-EXR output rather than erroring the whole render.
+        MIRAGE_LOG_WARN("Product '{}' requested AOVs but output extension '{}' isn't EXR - AOVs need per-channel EXR "
+                         "output, only the beauty image will be written",
+                         product.name, extension);
+    }
+
+    MIRAGE_LOG_DEBUG("Debug: Converting image for saving (product '{}')", product.name);
+    std::vector<unsigned char> imageData(static_cast<size_t>(width) * static_cast<size_t>(height) * 3);
+    for (int i = 0; i < width * height; ++i)
+    {
+        Color pixel = ApplyViewTransform(beauty[i], product.viewTransform, exposure);
+
+        imageData[i * 3 + 0] = static_cast<unsigned char>(255.0f * Clamp(pixel.x, 0.0f, 1.0f));
+        imageData[i * 3 + 1] = static_cast<unsigned char>(255.0f * Clamp(pixel.y, 0.0f, 1.0f));
+        imageData[i * 3 + 2] = static_cast<unsigned char>(255.0f * Clamp(pixel.z, 0.0f, 1.0f));
+    }
+
+    bool success = false;
+    if (extension == "png")
+    {
+        success = stbi_write_png(outputFile.c_str(), width, height, 3, imageData.data(), width * 3) != 0;
+    }
+    else if (extension == "jpg" || extension == "jpeg")
+    {
+        success = stbi_write_jpg(outputFile.c_str(), width, height, 3, imageData.data(), 95) != 0;
+    }
+    else if (extension == "bmp")
+    {
+        success = stbi_write_bmp(outputFile.c_str(), width, height, 3, imageData.data()) != 0;
+    }
+    else if (extension == "tga")
+    {
+        success = stbi_write_tga(outputFile.c_str(), width, height, 3, imageData.data()) != 0;
+    }
+    else
+    {
+        // Unrecognized extension: replace it with .png rather than
+        // appending, so e.g. "out.foo" becomes "out.png", not "out.foo.png".
+        MIRAGE_LOG_WARN("Product '{}': unrecognized output extension '{}', defaulting to PNG", product.name, extension);
+        size_t dotPos = outputFile.find_last_of(".");
+        outputFile = (dotPos != std::string::npos) ? outputFile.substr(0, dotPos) + ".png" : outputFile + ".png";
+        success = stbi_write_png(outputFile.c_str(), width, height, 3, imageData.data(), width * 3) != 0;
+    }
+
+    if (success)
+        MIRAGE_LOG_DEBUG("Image saved to {}", outputFile);
+    else
+        MIRAGE_LOG_ERROR("Failed to save image to {}", outputFile);
+
+    return success;
+}
+
+// Groups a scene file's render_settings { } blocks into RenderPasses -
+// definitions sharing the same effective (width, height, samples) triple
+// (after resolving each block's -1 "not set" sentinels against
+// fallbackWidth/fallbackHeight/fallbackSamples, the positional CLI args)
+// share one RenderPass/one Render() call; a differing triple starts a new
+// pass. Passes are emitted in order of first appearance, not sorted.
+//
+// `baseOptions` must already have every field EXCEPT width/height/
+// maxSamples/aovMask set (mode/type/maxDepth/filter/exposure/clamp/
+// enableDOF/accumulateAovs/enableDenoise/nlmWidth/nlmFalloff) - those three
+// are filled in per-pass below from each group's resolved triple/aovMask
+// union.
+//
+// Returns an empty RenderSettings (not a partial one) on any per-block
+// problem (bad aovs/view_transform name, missing output path) - logs which
+// block (by its `name` key) failed, so a scene-file typo doesn't silently
+// drop just that one product from an otherwise-successful multi-product
+// render; the caller should treat an empty result as a fatal parse error.
+RenderSettings BuildRenderSettingsFromDefs(const std::vector<RenderSettingsDefinition> &defs, const Options &baseOptions,
+                                            int fallbackWidth, int fallbackHeight, int fallbackSamples)
+{
+    struct ResolvedProduct
+    {
+        RenderProduct product;
+        int width, height, samples;
+    };
+
+    std::vector<ResolvedProduct> resolved;
+    resolved.reserve(defs.size());
+
+    for (const RenderSettingsDefinition &def : defs)
+    {
+        if (def.output.empty())
+        {
+            MIRAGE_LOG_ERROR("render_settings '{}': missing required 'output' key", def.name);
+            return {};
+        }
+
+        uint32_t productAovMask = 0;
+        if (!def.aovsRaw.empty() && !ParseAovMask(def.aovsRaw, &productAovMask))
+        {
+            MIRAGE_LOG_ERROR("render_settings '{}': unrecognized name in aovs '{}'", def.name, def.aovsRaw);
+            return {};
+        }
+
+        Mirage::ViewTransform productViewTransform = Mirage::ViewTransform::eFilmic;
+        if (!ParseViewTransformName(def.viewTransformRaw, &productViewTransform))
+        {
+            MIRAGE_LOG_ERROR("render_settings '{}': unrecognized view_transform '{}'", def.name, def.viewTransformRaw);
+            return {};
+        }
+
+        RenderProduct product;
+        product.name = def.name;
+        product.outputPath = def.output;
+        product.aovMask = productAovMask;
+        product.viewTransform = productViewTransform;
+
+        ResolvedProduct rp;
+        rp.product = std::move(product);
+        rp.width = def.width > 0 ? def.width : fallbackWidth;
+        rp.height = def.height > 0 ? def.height : fallbackHeight;
+        rp.samples = def.samples > 0 ? def.samples : fallbackSamples;
+        resolved.push_back(std::move(rp));
+    }
+
+    RenderSettings settings;
+    for (const ResolvedProduct &rp : resolved)
+    {
+        // Linear scan for a matching existing pass - scene files have at
+        // most a handful of render_settings blocks, so this is nowhere
+        // near a hot path.
+        RenderPass *pass = nullptr;
+        for (RenderPass &candidate : settings)
+        {
+            if (candidate.options.width == rp.width && candidate.options.height == rp.height &&
+                candidate.options.maxSamples == rp.samples)
+            {
+                pass = &candidate;
+                break;
+            }
+        }
+
+        if (!pass)
+        {
+            RenderPass newPass;
+            newPass.options = baseOptions;
+            newPass.options.width = rp.width;
+            newPass.options.height = rp.height;
+            newPass.options.maxSamples = rp.samples;
+            settings.push_back(std::move(newPass));
+            pass = &settings.back();
+        }
+
+        pass->options.aovMask |= rp.product.aovMask;
+        pass->products.push_back(rp.product);
+    }
+
+    return settings;
+}
+
 // Main function
 int main(int argc, char *argv[])
 {
@@ -1279,6 +1620,7 @@ int main(int argc, char *argv[])
     Mirage::Logging::Level logLevel = Mirage::Logging::Level::eInfo;
     Mirage::ViewTransform viewTransform = Mirage::ViewTransform::eFilmic;
     uint32_t aovMask = 0;
+    bool enableDenoise = false;
     std::vector<std::string> args;
     for (int i = 0; i < argc; ++i)
     {
@@ -1328,15 +1670,7 @@ int main(int argc, char *argv[])
                 value = arg.substr(kViewTransformEq.size());
             }
 
-            if (value == "filmic")
-                viewTransform = Mirage::ViewTransform::eFilmic;
-            else if (value == "aces")
-                viewTransform = Mirage::ViewTransform::eAcesLike;
-            else if (value == "srgb")
-                viewTransform = Mirage::ViewTransform::eSrgbDisplay;
-            else if (value == "none")
-                viewTransform = Mirage::ViewTransform::eNone;
-            else
+            if (!ParseViewTransformName(value, &viewTransform))
             {
                 MIRAGE_LOG_ERROR("Unrecognized --view-transform value '{}' (want filmic|aces|srgb|none)", value);
                 return 1;
@@ -1367,25 +1701,21 @@ int main(int argc, char *argv[])
                 value = arg.substr(kAovsEq.size());
             }
 
-            std::istringstream aovStream(value);
-            std::string aovName;
-            while (std::getline(aovStream, aovName, ','))
+            if (!ParseAovMask(value, &aovMask))
             {
-                aovName = trim(aovName);
-                if (aovName == "depth")
-                    aovMask |= Mirage::kAovDepth;
-                else if (aovName == "normal")
-                    aovMask |= Mirage::kAovNormal;
-                else if (aovName == "primid")
-                    aovMask |= Mirage::kAovPrimId;
-                else if (aovName == "albedo")
-                    aovMask |= Mirage::kAovAlbedo;
-                else
-                {
-                    MIRAGE_LOG_ERROR("Unrecognized --aovs name '{}' (want depth|normal|primid|albedo)", aovName);
-                    return 1;
-                }
+                MIRAGE_LOG_ERROR("Unrecognized name in --aovs '{}' (want depth|normal|primid|albedo)", value);
+                return 1;
             }
+            continue;
+        }
+
+        // Post-process Non-Local-Means denoise (mirage/filter/NLM.h) applied
+        // to the beauty buffer after Render() returns, before any view
+        // transform/write - see the pass loop below for the guide-buffer
+        // (albedo/normal) wiring.
+        if (arg == "--denoise")
+        {
+            enableDenoise = true;
             continue;
         }
 
@@ -1398,7 +1728,8 @@ int main(int argc, char *argv[])
     if (args.size() < 3)
     {
         MIRAGE_LOG_ERROR(
-            "Usage: {} [--log-level trace|debug|info|warn|error|critical] [--view-transform filmic|aces|srgb|none] [--aovs depth,normal,primid,albedo] <scene_file> <output_image> [width] [height] [samples]",
+            "Usage: {} [--log-level trace|debug|info|warn|error|critical] [--view-transform filmic|aces|srgb|none] "
+            "[--aovs depth,normal,primid,albedo] [--denoise] <scene_file> <output_image> [width] [height] [samples]",
             args.empty() ? "scene_renderer" : args[0]);
         return 1;
     }
@@ -1464,174 +1795,160 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // Setup rendering options
+    // Shared config every RenderPass this invocation executes starts from.
+    // width/height/maxSamples here are the positional-CLI-arg fallback
+    // values: BuildRenderSettingsFromDefs overrides them per pass from each
+    // render_settings block's own (or its own fallback-resolved) values, but
+    // MakeLegacyRenderSettings does NOT touch them at all - for the legacy
+    // (no render_settings blocks) path, these are the actual final values
+    // used, so they must be set here, not left at Options' uninitialized
+    // defaults.
     MIRAGE_LOG_DEBUG("Debug: Setting up rendering options");
-    Options options;
-    options.width = width;
-    options.height = height;
-    options.maxSamples = samples;
-    options.maxDepth = 5;
-    options.mode = RenderMode::ePathTrace;
-    options.type = RenderType::eCpu;
-    options.filter = Filter(FilterType::eFilterGaussian, 1.0f, 2.0f);
-    options.exposure = 1.0f;
-    options.clamp = 10.0f;
-    options.enableDOF = false;
-    options.aovMask = aovMask;
+    Options baseOptions;
+    baseOptions.width = width;
+    baseOptions.height = height;
+    baseOptions.maxSamples = samples;
+    baseOptions.maxDepth = 5;
+    baseOptions.mode = RenderMode::ePathTrace;
+    baseOptions.type = RenderType::eCpu;
+    baseOptions.filter = Filter(FilterType::eFilterGaussian, 1.0f, 2.0f);
+    baseOptions.exposure = 1.0f;
+    baseOptions.clamp = 10.0f;
+    baseOptions.enableDOF = false;
+    baseOptions.enableDenoise = enableDenoise;
+    // NLM denoise defaults - see Renderer.h's Options::nlmWidth/nlmFalloff
+    // comment. No CLI flag exposes these yet (only on/off via --denoise);
+    // tuning them further is a natural follow-up once --denoise itself has
+    // seen real use.
+    baseOptions.nlmWidth = 3.0f;
+    baseOptions.nlmFalloff = 10.0f;
 
     // Compose the manual exposure multiplier above with any physically-
     // derived one from the camera's fStop/shutterSpeed/iso (see
     // Camera::ComputeExposureMultiplier) - this is 1.0 (no-op) unless the
     // scene's camera block set all three, so this is a no-op for every
     // scene that doesn't opt into physical exposure.
-    options.exposure *= scene.camera->ComputeExposureMultiplier();
+    baseOptions.exposure *= scene.camera->ComputeExposureMultiplier();
 
-    // Allocate memory for output image
-    MIRAGE_LOG_DEBUG("Debug: Allocating memory for output image");
-    std::vector<Color> outputImage(width * height, Color(0.0f));
+    // Render-settings-map / multi-product batch pipeline
+    // (docs/PRODUCTION_READINESS.md's Tier 3 finding): a scene file's
+    // repeatable render_settings { } blocks (if any) drive N output
+    // products, possibly across multiple resolutions/sample counts grouped
+    // into separate RenderPasses; with none, fall back to exactly the
+    // single-pass/single-product behavior every pre-existing invocation
+    // (positional args + --aovs/--view-transform) already had.
+    RenderSettings settings;
+    const std::vector<RenderSettingsDefinition> &renderSettingsDefs = parser.GetRenderSettingsDefs();
+    if (!renderSettingsDefs.empty())
+    {
+        MIRAGE_LOG_DEBUG("Debug: Building render settings from {} render_settings block(s)", renderSettingsDefs.size());
+        MIRAGE_LOG_DEBUG(
+            "Debug: scene file has render_settings blocks - positional <output_image> arg '{}' is ignored", outputFile);
 
-    // AOV backing storage - only allocated for buffers --aovs actually
-    // requested (aovMask's set bits), so a beauty-only render (the default,
-    // aovMask == 0) allocates nothing extra, matching every pre-existing
-    // call site's behavior.
-    AovBuffers aovs;
-    std::vector<Color> aovDepthBuf, aovNormalBuf, aovPrimIdBuf, aovAlbedoBuf;
-    if (aovMask & kAovDepth)
-    {
-        aovDepthBuf.assign(width * height, Color(0.0f));
-        aovs.depth = aovDepthBuf.data();
-    }
-    if (aovMask & kAovNormal)
-    {
-        aovNormalBuf.assign(width * height, Color(0.0f));
-        aovs.normal = aovNormalBuf.data();
-    }
-    if (aovMask & kAovPrimId)
-    {
-        aovPrimIdBuf.assign(width * height, Color(0.0f));
-        aovs.primId = aovPrimIdBuf.data();
-    }
-    if (aovMask & kAovAlbedo)
-    {
-        aovAlbedoBuf.assign(width * height, Color(0.0f));
-        aovs.albedo = aovAlbedoBuf.data();
-    }
-
-    // Render the scene
-    MIRAGE_LOG_DEBUG("Debug: Starting rendering");
-    try
-    {
-        renderer->Render(*scene.camera, options, outputImage.data(), aovMask != 0 ? &aovs : nullptr);
-        MIRAGE_LOG_DEBUG("Debug: Rendering completed");
-    }
-    catch (const std::exception &e)
-    {
-        MIRAGE_LOG_ERROR("Exception during rendering: {}", e.what());
-        delete renderer;
-        return 1;
-    }
-    catch (...)
-    {
-        MIRAGE_LOG_ERROR("Unknown exception during rendering");
-        delete renderer;
-        return 1;
-    }
-
-    // Save the image
-    MIRAGE_LOG_DEBUG("Debug: Saving image");
-    std::string extension = outputFile.substr(outputFile.find_last_of(".") + 1);
-    bool success = false;
-
-    if (extension == "exr")
-    {
-        // Full float32, untonemapped output - skip the 8-bit LDR conversion
-        // below entirely, tonemapping/quantization are LDR-only concerns.
-        if (aovMask != 0)
+        settings = BuildRenderSettingsFromDefs(renderSettingsDefs, baseOptions, width, height, samples);
+        if (settings.empty())
         {
-            MIRAGE_LOG_DEBUG("Debug: Writing multi-layer float EXR output (beauty + AOVs)");
-            success = WriteMultiLayerExr(outputFile, outputImage.data(), aovs, aovMask, width, height);
-        }
-        else
-        {
-            MIRAGE_LOG_DEBUG("Debug: Writing float EXR output");
-            success = WriteExr(outputFile, outputImage.data(), width, height);
+            MIRAGE_LOG_ERROR("Failed to build render settings from scene file's render_settings blocks");
+            delete renderer;
+            return 1;
         }
     }
     else
     {
-        if (aovMask != 0)
-        {
-            // AOVs need per-channel layers, which only EXR supports here -
-            // matches WriteMultiLayerExr's doc comment. Beauty still writes
-            // normally below; the requested AOVs are just silently dropped
-            // from a non-EXR output rather than erroring the whole render.
-            MIRAGE_LOG_WARN("--aovs was requested but output extension '{}' isn't EXR - AOVs need per-channel EXR "
-                             "output, only the beauty image will be written",
-                             extension);
-        }
-
-        // Convert the rendered image to 8-bit RGB for saving
-        MIRAGE_LOG_DEBUG("Debug: Converting image for saving");
-        std::vector<unsigned char> imageData(width * height * 3);
-
-        for (int i = 0; i < width * height; i++)
-        {
-            // Apply the selected view transform (exposure + tonemap +
-            // display encode all handled inside ApplyViewTransform) - was
-            // previously a hardcoded ToneMap(outputImage[i], options.exposure)
-            // call, which (a) fed options.exposure into ToneMap's `limit`
-            // parameter, dead until this change, so exposure never actually
-            // had any visible effect before now, and (b) never gave callers
-            // a way to pick ToneMapACES or a plain sRGB display transform.
-            Color pixel = ApplyViewTransform(outputImage[i], viewTransform, options.exposure);
-
-            // Convert to 8-bit RGB
-            int r = int(255.0f * Clamp(pixel.x, 0.0f, 1.0f));
-            int g = int(255.0f * Clamp(pixel.y, 0.0f, 1.0f));
-            int b = int(255.0f * Clamp(pixel.z, 0.0f, 1.0f));
-
-            // Store in the output buffer (RGB format)
-            imageData[i * 3 + 0] = (unsigned char)r;
-            imageData[i * 3 + 1] = (unsigned char)g;
-            imageData[i * 3 + 2] = (unsigned char)b;
-        }
-
-        if (extension == "png")
-        {
-            success = stbi_write_png(outputFile.c_str(), width, height, 3, imageData.data(), width * 3) != 0;
-        }
-        else if (extension == "jpg" || extension == "jpeg")
-        {
-            success = stbi_write_jpg(outputFile.c_str(), width, height, 3, imageData.data(), 95) != 0;
-        }
-        else if (extension == "bmp")
-        {
-            success = stbi_write_bmp(outputFile.c_str(), width, height, 3, imageData.data()) != 0;
-        }
-        else if (extension == "tga")
-        {
-            success = stbi_write_tga(outputFile.c_str(), width, height, 3, imageData.data()) != 0;
-        }
-        else
-        {
-            // Unrecognized extension: replace it with .png rather than
-            // appending, so e.g. "out.foo" becomes "out.png", not
-            // "out.foo.png".
-            MIRAGE_LOG_WARN("Unrecognized output extension '{}', defaulting to PNG", extension);
-            size_t dotPos = outputFile.find_last_of(".");
-            outputFile = (dotPos != std::string::npos) ? outputFile.substr(0, dotPos) + ".png" : outputFile + ".png";
-            success = stbi_write_png(outputFile.c_str(), width, height, 3, imageData.data(), width * 3) != 0;
-        }
+        settings = MakeLegacyRenderSettings(baseOptions, outputFile, aovMask, viewTransform);
     }
 
-    if (success)
+    for (RenderPass &pass : settings)
     {
-        MIRAGE_LOG_DEBUG("Image saved to {}", outputFile);
-    }
-    else
-    {
-        MIRAGE_LOG_ERROR("Failed to save image to {}", outputFile);
-        return 1;
+        int passWidth = pass.options.width;
+        int passHeight = pass.options.height;
+
+        // --denoise needs albedo/normal as cross-bilateral guide buffers
+        // (mirage/filter/NLM.h) regardless of whether any product in this
+        // pass actually asked for them as AOV output - requested here so
+        // Render() populates them, but product.aovMask (unmodified) is what
+        // WriteRenderProduct uses to decide what to actually write to disk,
+        // so a guide-only albedo/normal never leaks into a file the user
+        // didn't ask for.
+        uint32_t guideMask = enableDenoise ? (kAovAlbedo | kAovNormal) : 0u;
+        pass.options.aovMask |= guideMask;
+
+        MIRAGE_LOG_DEBUG("Rendering pass ({}x{}, {} samples, {} product(s))", passWidth, passHeight, pass.options.maxSamples,
+                          pass.products.size());
+
+        std::vector<Color> outputImage(static_cast<size_t>(passWidth) * static_cast<size_t>(passHeight), Color(0.0f));
+
+        // AOV backing storage - only allocated for buffers this pass
+        // actually needs (aovMask's set bits, including any guide-only bits
+        // just added above), so a beauty-only pass allocates nothing extra,
+        // matching every pre-existing call site's behavior.
+        AovBuffers aovs;
+        std::vector<Color> aovDepthBuf, aovNormalBuf, aovPrimIdBuf, aovAlbedoBuf;
+        if (pass.options.aovMask & kAovDepth)
+        {
+            aovDepthBuf.assign(outputImage.size(), Color(0.0f));
+            aovs.depth = aovDepthBuf.data();
+        }
+        if (pass.options.aovMask & kAovNormal)
+        {
+            aovNormalBuf.assign(outputImage.size(), Color(0.0f));
+            aovs.normal = aovNormalBuf.data();
+        }
+        if (pass.options.aovMask & kAovPrimId)
+        {
+            aovPrimIdBuf.assign(outputImage.size(), Color(0.0f));
+            aovs.primId = aovPrimIdBuf.data();
+        }
+        if (pass.options.aovMask & kAovAlbedo)
+        {
+            aovAlbedoBuf.assign(outputImage.size(), Color(0.0f));
+            aovs.albedo = aovAlbedoBuf.data();
+        }
+
+        MIRAGE_LOG_DEBUG("Debug: Starting rendering");
+        try
+        {
+            renderer->Render(*scene.camera, pass.options, outputImage.data(), pass.options.aovMask != 0 ? &aovs : nullptr);
+            MIRAGE_LOG_DEBUG("Debug: Rendering completed");
+        }
+        catch (const std::exception &e)
+        {
+            MIRAGE_LOG_ERROR("Exception during rendering: {}", e.what());
+            delete renderer;
+            return 1;
+        }
+        catch (...)
+        {
+            MIRAGE_LOG_ERROR("Unknown exception during rendering");
+            delete renderer;
+            return 1;
+        }
+
+        if (enableDenoise)
+        {
+            MIRAGE_LOG_DEBUG("Debug: Denoising pass output");
+            std::vector<Color> denoised(outputImage.size());
+            // NonLocalMeansFilter's radius is an int pixel count;
+            // Options::nlmWidth is a float for consistency with the rest of
+            // Options (see its doc comment) - round rather than truncate,
+            // and floor at 1 (radius 0 would mean "no neighborhood at all").
+            int radius = std::max(1, static_cast<int>(std::lround(pass.options.nlmWidth)));
+            NonLocalMeansFilter(outputImage.data(), denoised.data(), passWidth, passHeight, pass.options.nlmFalloff, radius,
+                                 aovs.albedo, aovs.normal);
+            outputImage = std::move(denoised);
+        }
+
+        bool anyProductFailed = false;
+        for (const RenderProduct &product : pass.products)
+        {
+            if (!WriteRenderProduct(product, outputImage.data(), aovs, passWidth, passHeight, pass.options.exposure))
+                anyProductFailed = true;
+        }
+        if (anyProductFailed)
+        {
+            delete renderer;
+            return 1;
+        }
     }
 
     // Clean up

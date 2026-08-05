@@ -121,8 +121,19 @@ namespace Mirage
         float limit;
         float clamp;
 
-        float nlmWidth;
-        float nlmFalloff;
+        // Non-Local-Means post-process denoise (mirage/filter/NLM.h) config -
+        // NOT consumed by Render() itself (no backend denoises its own
+        // output); a CLI/pipeline caller reads these after Render() returns
+        // and applies NonLocalMeansFilter() to the output buffer directly
+        // (see tools/scene_renderer/SceneRenderer.cpp's --denoise flag).
+        // Housed on Options anyway (not a SceneRenderer-local variable) so
+        // denoise config travels with the rest of a render's settings the
+        // same way aovMask/accumulateAovs do - previously declared here but
+        // never read anywhere, a dead "the previous implementer got this far
+        // and stopped" finding (docs/PRODUCTION_READINESS.md's Tier 3
+        // "denoiser is dead code" item).
+        float nlmWidth;   // neighborhood radius in pixels (NonLocalMeansFilter's `radius`, rounded to int)
+        float nlmFalloff; // similarity weight falloff (NonLocalMeansFilter's `falloff`)
 
         int maxDepth;
         int maxSamples;
@@ -146,6 +157,12 @@ namespace Mirage
         // are already overwritten-not-accumulated by construction - see
         // VulkanRenderer.cpp).
         bool accumulateAovs = false;
+
+        // false (default): no post-process denoise, preserving every
+        // pre-existing call site's behavior. true: the CLI/pipeline caller
+        // (not Render() itself - see nlmWidth/nlmFalloff above) applies
+        // NonLocalMeansFilter to the beauty buffer using nlmWidth/nlmFalloff.
+        bool enableDenoise = false;
     };
 
     struct Renderer
