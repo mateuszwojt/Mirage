@@ -521,6 +521,89 @@ namespace
         scene.Build();
     }
 
+    // Tier-2 "punctual lights + rect/disk area lights": a diffuse sphere at
+    // the origin (same as BuildPathTraceTestScene, so GeneratePathTraceTestCase's
+    // existing ray fan hits real geometry), lit by one of each new light
+    // type - a point light, a directional light, a rect area light, and a
+    // disk area light - so this scene exercises every new CPU/GPU code path
+    // added by that feature in a single RunPathTraceValidation() comparison:
+    // Intersection.h/Primitive.slang's eRect/eDisk cases (via the rect/disk
+    // Primitives being both directly visible and NEE-sampled), and
+    // PunctualLight.h/PunctualLight.slang's no-MIS NEE block (via
+    // scene.lights). Transmission/subsurface stay at Material() defaults for
+    // the same "deterministic BSDF branch decisions" reason as
+    // BuildPathTraceTestScene's comment explains.
+    void BuildPunctualAndAreaLightTestScene(Scene &scene)
+    {
+        Primitive spherePrim;
+        spherePrim.type = eSphere;
+        spherePrim.sphere.radius = 1.0f;
+        spherePrim.startTransform = Transform(Vec3(0.0f, 0.0f, 0.0f));
+        spherePrim.endTransform = spherePrim.startTransform;
+        {
+            auto sphereMat = std::make_unique<Material>();
+            sphereMat->color = Vec3(0.6f, 0.6f, 0.6f);
+            sphereMat->roughness = 0.5f;
+            spherePrim.materialIndex = scene.AddMaterial(std::move(sphereMat));
+        }
+        scene.AddPrimitive(spherePrim);
+
+        // Rect area light, facing down toward the sphere (local +Z rotated
+        // to -Y via a 90-degree rotation about X).
+        {
+            Primitive rectPrim;
+            rectPrim.type = eRect;
+            rectPrim.rect.width = 2.0f;
+            rectPrim.rect.height = 2.0f;
+            rectPrim.startTransform = Transform(Vec3(0.0f, 3.0f, 1.0f), Quat(0.7071068f, 0.0f, 0.0f, 0.7071068f));
+            rectPrim.endTransform = rectPrim.startTransform;
+            auto rectMat = std::make_unique<Material>();
+            rectMat->emission = Vec3(4.0f, 4.0f, 3.5f);
+            rectPrim.materialIndex = scene.AddMaterial(std::move(rectMat));
+            rectPrim.lightSamples = 2;
+            scene.AddPrimitive(rectPrim);
+        }
+
+        // Disk area light, off to one side.
+        {
+            Primitive diskPrim;
+            diskPrim.type = eDisk;
+            diskPrim.disk.radius = 0.6f;
+            diskPrim.startTransform = Transform(Vec3(-2.0f, 1.5f, 2.0f), Quat(0.5f, 0.5f, 0.5f, 0.5f));
+            diskPrim.endTransform = diskPrim.startTransform;
+            auto diskMat = std::make_unique<Material>();
+            diskMat->emission = Vec3(3.0f, 2.0f, 2.0f);
+            diskPrim.materialIndex = scene.AddMaterial(std::move(diskMat));
+            diskPrim.lightSamples = 2;
+            scene.AddPrimitive(diskPrim);
+        }
+
+        // Point light.
+        {
+            PunctualLight point;
+            point.type = PunctualLightType::ePoint;
+            point.position = Vec3(2.5f, 2.0f, 2.5f);
+            point.color = Vec3(1.0f, 0.5f, 0.5f);
+            point.intensity = 20.0f;
+            scene.lights.push_back(point);
+        }
+
+        // Directional light.
+        {
+            PunctualLight sun;
+            sun.type = PunctualLightType::eDirectional;
+            sun.direction = Normalize(Vec3(-0.3f, -1.0f, -0.4f));
+            sun.color = Vec3(0.5f, 0.5f, 1.0f);
+            sun.intensity = 1.2f;
+            scene.lights.push_back(sun);
+        }
+
+        scene.sky.horizon = Vec3(0.05f, 0.05f, 0.07f);
+        scene.sky.zenith = Vec3(0.01f, 0.01f, 0.02f);
+
+        scene.Build();
+    }
+
     struct PathTraceTestInput
     {
         Vec3 origin, dir;
@@ -569,6 +652,12 @@ namespace
         Scene scene;
         buildScene(scene);
         uint32_t numPrimitives = (uint32_t)scene.primitives.size();
+        // Tier-2 "punctual lights" - scene.lights isn't part of the BVH/
+        // primitives array, so it needs its own explicit count, mirroring
+        // numPrimitives above (see GpuFrameParams.numLights/
+        // GpuPathTraceTestCase.numLights). The CPU side needs no equivalent
+        // here - PathTrace(scene, ...) below reads scene.lights directly.
+        uint32_t numLights = (uint32_t)scene.lights.size();
 
         std::vector<PathTraceTestInput> inputs;
         std::vector<GpuPathTraceTestCase> gpuCases;
@@ -589,6 +678,7 @@ namespace
                 gc.maxDepth = in.maxDepth;
                 gc.seed = in.seed;
                 gc.numPrimitives = numPrimitives;
+                gc.numLights = numLights;
                 gpuCases.push_back(gc);
             }
         }
@@ -2082,10 +2172,16 @@ int main()
     bool instancingPass = RunInstancingValidation();
     bool opacityPass = RunOpacityValidation();
     bool normalMappingPass = RunNormalMappingValidation();
+    // Tier-2 "punctual lights + rect/disk area lights" - see
+    // BuildPunctualAndAreaLightTestScene's comment. atol matches the tight
+    // analytic-sky case above (0.01) since this scene introduces no new
+    // known CPU/GPU deviation source (no probe, no textures).
+    bool punctualLightsPass = RunPathTraceValidation(
+        [](Scene &s) { BuildPunctualAndAreaLightTestScene(s); }, 0.01f, "punctual+area lights");
 
     bool pass = normalsPass && bsdfPass && pathTracePass && pathTraceProbePass && probePass &&
                 textureArraySpikePass && textureSamplingPass && pathTraceTexturedPass && motionBlurPass &&
-                instancingPass && opacityPass && normalMappingPass;
+                instancingPass && opacityPass && normalMappingPass && punctualLightsPass;
     printf("%s\n", pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;
 }

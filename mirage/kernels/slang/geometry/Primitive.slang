@@ -126,13 +126,23 @@ bool IntersectRayMesh(GpuMeshDescriptor desc, float3 origin, float3 dir, float t
     return closestTri >= 0;
 }
 
-// Mirrors PrimitiveIntersect's dispatch across sphere/plane/mesh. outUV is
-// only populated for eMesh hits on a mesh with UV data (desc.hasUVs != 0) -
-// left at float2(0.0f) otherwise, mirroring the CPU's PrimitiveIntersect
-// outUV convention (Intersection.h) exactly. Sphere/plane hits never
-// populate outUV - no procedural UV for non-mesh primitives in this
-// milestone (see the plan's Deferrals). outTangent follows the same
-// convention, gated on desc.hasTangents != 0 instead of desc.hasUVs.
+// Mirrors PrimitiveIntersect's dispatch across sphere/plane/mesh/rect/disk.
+// outUV is only populated for eMesh hits on a mesh with UV data
+// (desc.hasUVs != 0) - left at float2(0.0f) otherwise, mirroring the CPU's
+// PrimitiveIntersect outUV convention (Intersection.h) exactly. Sphere/
+// plane/rect/disk hits never populate outUV - no procedural UV for non-mesh
+// primitives in this milestone (see the plan's Deferrals). outTangent
+// follows the same convention, gated on desc.hasTangents != 0 instead of
+// desc.hasUVs.
+//
+// IMPORTANT: this is deliberately an exhaustive if/else-if chain over every
+// type value (0..4), NOT an if/else-if/.../else-means-mesh chain - a
+// trailing catch-all `else` here would make any future/unhandled type value
+// (e.g. a bug that leaves prim.type uninitialized) silently attempt mesh
+// intersection against prim.meshIndex, which is garbage for a non-mesh
+// primitive. See CPU Intersection.h's PrimitiveIntersect for the equivalent
+// switch (which has no default: for the same reason - unhandled types
+// should fall through to "no hit", not "hit as mesh").
 bool PrimitiveIntersect(GpuPrimitive prim, float3 rayOrigin, float3 rayDir, float rayTime,
                          out float outT, out float3 outNormal, out float2 outUV, out float3 outTangent)
 {
@@ -161,7 +171,7 @@ bool PrimitiveIntersect(GpuPrimitive prim, float3 rayOrigin, float3 rayDir, floa
             outNormal = prim.unionData.xyz;
         return hit;
     }
-    else // mesh
+    else if (prim.type == 2) // mesh
     {
         if (prim.meshIndex < 0)
             return false;
@@ -219,6 +229,46 @@ bool PrimitiveIntersect(GpuPrimitive prim, float3 rayOrigin, float3 rayDir, floa
         }
         return hit;
     }
+    else if (prim.type == 3 || prim.type == 4) // rect / disk
+    {
+        // Both shapes live in the primitive's local z=0 plane - see
+        // Intersection.h's identical eRect/eDisk case for the "local t ==
+        // world t" reasoning (the 1/s from InverseTransformVector cancels
+        // against the s reapplied by TransformPoint/Vector on the way back).
+        float3 localOrigin = GpuTransform_InverseTransformPoint(transform, rayOrigin);
+        float3 localDir = GpuTransform_InverseTransformVector(transform, rayDir);
+
+        if (localDir.z == 0.0f)
+            return false;
+
+        float t = -localOrigin.z / localDir.z;
+        if (t <= 0.0f)
+            return false;
+
+        float3 localHit = localOrigin + localDir * t;
+
+        bool hit;
+        if (prim.type == 3) // rect: unionData = (width, height, _, _)
+        {
+            hit = (abs(localHit.x) <= prim.unionData.x * 0.5f) &&
+                  (abs(localHit.y) <= prim.unionData.y * 0.5f);
+        }
+        else // disk: unionData = (radius, _, _, _)
+        {
+            hit = (localHit.x * localHit.x + localHit.y * localHit.y) <= (prim.unionData.x * prim.unionData.x);
+        }
+
+        if (hit)
+        {
+            outT = t;
+            outNormal = normalize(GpuTransform_TransformVector(transform, float3(0.0f, 0.0f, 1.0f)));
+        }
+        return hit;
+    }
+    else
+    {
+        return false;
+    }
 }
 
 // Mirrors PrimitiveArea's dispatch.
@@ -232,11 +282,25 @@ float PrimitiveArea(GpuPrimitive prim)
     {
         return 0.0f;
     }
-    else // mesh
+    else if (prim.type == 2) // mesh
     {
         if (prim.meshIndex < 0)
             return 0.0f;
         return g_MeshDescriptors[prim.meshIndex].area * prim.endTransform.s;
+    }
+    else if (prim.type == 3) // rect: unionData = (width, height, _, _)
+    {
+        float s = prim.endTransform.s;
+        return prim.unionData.x * prim.unionData.y * s * s;
+    }
+    else if (prim.type == 4) // disk: unionData = (radius, _, _, _)
+    {
+        float s = prim.endTransform.s;
+        return kPi * prim.unionData.x * prim.unionData.x * s * s;
+    }
+    else
+    {
+        return 0.0f;
     }
 }
 
@@ -255,6 +319,22 @@ void PrimitiveSample(GpuPrimitive prim, float time, inout Random rand, out float
         Sample2D(rand, u1, u2);
         pos = GpuTransform_TransformPoint(transform, UniformSampleSphere(u1, u2) * prim.unionData.x);
         normal = normalize(pos - transform.p);
+    }
+    else if (prim.type == 3) // rect: unionData = (width, height, _, _)
+    {
+        float u1, u2;
+        Sample2D(rand, u1, u2);
+        float3 localPos = float3((u1 - 0.5f) * prim.unionData.x, (u2 - 0.5f) * prim.unionData.y, 0.0f);
+        pos = GpuTransform_TransformPoint(transform, localPos);
+        normal = normalize(GpuTransform_TransformVector(transform, float3(0.0f, 0.0f, 1.0f)));
+    }
+    else if (prim.type == 4) // disk: unionData = (radius, _, _, _)
+    {
+        float u1, u2;
+        Sample2D(rand, u1, u2);
+        float2 disc = UniformSampleDisc(u1, u2) * prim.unionData.x;
+        pos = GpuTransform_TransformPoint(transform, float3(disc.x, disc.y, 0.0f));
+        normal = normalize(GpuTransform_TransformVector(transform, float3(0.0f, 0.0f, 1.0f)));
     }
     // plane / mesh: not sampled as lights by any current test scene.
 }

@@ -327,6 +327,38 @@ namespace Mirage
 			sum += L * (1.0f / numSamples);
 		}
 
+		// Punctual (point/directional) lights: delta-distribution sources,
+		// not part of scene.primitives - see PunctualLight.h. Deliberately
+		// NOT MIS-weighted against bsdfPdf like the area-light loop above -
+		// a delta light has no surface for a BSDF-sampled ray to ever
+		// coincidentally hit, so the balance-heuristic weight degenerates to
+		// exactly 1.0 for every sample here; applying the area-light
+		// formula (which divides by a lightPdf that doesn't exist for a
+		// delta distribution) would be wrong, not just redundant.
+		for (const PunctualLight &light : scene.lights)
+		{
+			Vec3 wi;
+			Vec3 radiance;
+			float dist;
+			PunctualLightSample(light, surfacePos, rand, wi, radiance, dist);
+
+			float t;
+			Vec3 n;
+			const Primitive *hit;
+			bool traced = TraceWithCutout(scene, Ray(surfacePos + FaceForward(surfaceNormal, wi) * kRayEpsilon, wi, time), t, n, &hit, rand);
+
+			// Unlike the area-light loop above (whose light IS real
+			// geometry the shadow ray is expected to hit), a punctual light
+			// has no surface to hit - "unoccluded" here means the shadow
+			// ray found nothing before reaching the light's distance.
+			const float kTolerance = 1.e-2f;
+			if (traced && t < dist - kTolerance)
+				continue;
+
+			Vec3 f = BSDFEval(surfaceMaterial, etaI, etaO, surfacePos, shadingNormal, wo, wi);
+			sum += f * radiance * Abs(Dot(wi, shadingNormal));
+		}
+
 		return sum;
 	}
 

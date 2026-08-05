@@ -10,7 +10,19 @@ namespace Mirage
     {
         eSphere,
         ePlane,
-        eMesh
+        eMesh,
+        // Finite-area punctual light shapes - unlike eSphere/ePlane/eMesh
+        // these exist primarily to be sampled as area lights (Primitive::
+        // lightSamples > 0 via a nonzero-emission material, same convention
+        // as every other primitive type), though they're regular
+        // intersectable/camera-visible geometry like any other primitive.
+        // Point/directional (delta-distribution, non-area, non-visible)
+        // lights are a separate concept - see Mirage::PunctualLight
+        // (mirage/lights/PunctualLight.h) and Scene::lights, deliberately
+        // outside this enum/union since they have no area or intersection
+        // geometry to speak of.
+        eRect,
+        eDisk
     };
 
     struct SphereGeometry
@@ -21,6 +33,24 @@ namespace Mirage
     struct PlaneGeometry
     {
         float plane[4];
+    };
+
+    // Local-space rectangle in the primitive's XY plane (normal = local +Z),
+    // centered at the origin, oriented/positioned via
+    // Primitive::startTransform/endTransform - same "geometry data + shared
+    // transform" convention as SphereGeometry/PlaneGeometry.
+    struct RectGeometry
+    {
+        float width;
+        float height;
+    };
+
+    // Local-space disk in the primitive's XY plane (normal = local +Z),
+    // centered at the origin, oriented/positioned via
+    // Primitive::startTransform/endTransform.
+    struct DiskGeometry
+    {
+        float radius;
     };
 
     struct MeshGeometry
@@ -78,6 +108,8 @@ namespace Mirage
             SphereGeometry sphere;
             PlaneGeometry plane;
             MeshGeometry mesh;
+            RectGeometry rect;
+            DiskGeometry disk;
         };
 
         Type type;

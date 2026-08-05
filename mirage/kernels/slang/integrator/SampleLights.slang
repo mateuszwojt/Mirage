@@ -12,12 +12,13 @@ import Primitive;
 import Trace;
 import Sky;
 import Probe;
+import PunctualLight;
 
 static const float kBsdfSamples = 1.0f;
 static const float kProbeSamples = 1.0f;
 
 float3 SampleLights(float3 surfacePos, float3 surfaceNormal, float3 shadingNormal, GpuMaterial surfaceMaterial,
-                     float etaI, float etaO, float3 wo, float time, uint numScenePrims, inout Random rand)
+                     float etaI, float etaO, float3 wo, float time, uint numScenePrims, uint numLights, inout Random rand)
 {
     float3 sum = float3(0.0f);
 
@@ -115,6 +116,38 @@ float3 SampleLights(float3 surfacePos, float3 surfaceNormal, float3 shadingNorma
         }
 
         sum += L * (1.0f / float(numSamples));
+    }
+
+    // Punctual (point/directional) lights - see PunctualLight.slang/
+    // lights/PunctualLight.h's comment on why this is deliberately NOT
+    // MIS-weighted against bsdfPdf like the area-light loop above (a delta
+    // light has no surface a BSDF-sampled ray could ever hit).
+    for (uint i = 0; i < numLights; ++i)
+    {
+        GpuLight light = g_Lights[i];
+
+        float3 wi, radiance;
+        float dist;
+        PunctualLight_Sample(light, surfacePos, rand, wi, radiance, dist);
+
+        float t;
+        float3 n;
+        int hitPrimIndex;
+        float2 shadowUV;
+        float3 shadowTangent;
+        float3 shadowOrigin = surfacePos + FaceForward(surfaceNormal, wi) * kRayEpsilon;
+        bool traced = TraceWithCutout(shadowOrigin, wi, time, numScenePrims, rand, t, n, hitPrimIndex, shadowUV, shadowTangent);
+
+        // Unlike the area-light loop above (whose light IS real geometry
+        // the shadow ray is expected to hit), a punctual light has no
+        // surface to hit - "unoccluded" here means the shadow ray found
+        // nothing before reaching the light's distance.
+        const float kTolerance = 1.e-2f;
+        if (traced && t < dist - kTolerance)
+            continue;
+
+        float3 f = BSDFEval(surfaceMaterial, etaI, etaO, surfacePos, shadingNormal, wo, wi);
+        sum += f * radiance * abs(dot(wi, shadingNormal));
     }
 
     return sum;

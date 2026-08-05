@@ -19,7 +19,7 @@ import NormalMapping;
 static const float kIntegratorBsdfSamples = 1.0f;
 static const float kIntegratorProbeSamples = 1.0f;
 
-float3 PathTrace(float3 startOrigin, float3 startDir, float time, int maxDepth, uint numScenePrims, inout Random rand,
+float3 PathTrace(float3 startOrigin, float3 startDir, float time, int maxDepth, uint numScenePrims, uint numLights, inout Random rand,
                   out float outDepth, out float3 outNormal, out int outPrimId)
 {
     // Primary-ray AOV capture defaults - overwritten below on a primary-ray
@@ -117,7 +117,7 @@ float3 PathTrace(float3 startOrigin, float3 startDir, float time, int maxDepth, 
                 }
             }
 
-            totalRadiance += pathThroughput * SampleLights(p, n, n, hitMaterial, rayEta, outEta, -rayDir, rayTime, numScenePrims, rand);
+            totalRadiance += pathThroughput * SampleLights(p, n, n, hitMaterial, rayEta, outEta, -rayDir, rayTime, numScenePrims, numLights, rand);
 
             if (hitPrim.lightSamples != 0)
                 break;
