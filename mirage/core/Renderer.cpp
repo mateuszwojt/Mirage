@@ -621,10 +621,10 @@ namespace Mirage
 			// create a sampler for the camera
 			CameraSampler sampler(
 				Transform(camera.position, camera.rotation),
-				camera.fov,
+				camera.EffectiveFov(),
 				0.001f,
 				1.0f,
-				camera.aperture,
+				camera.EffectiveApertureDiameter(),
 				camera.focalPoint,
 				options.enableDOF,
 				options.width,
