@@ -393,7 +393,8 @@ namespace Mirage
 	// expected to change).
 	Vec3 PathTrace(const Scene &scene, const Vec3 &startOrigin, const Vec3 &startDir, float time, int maxDepth, Random &rand,
 				   float *outDepth = nullptr, Vec3 *outNormal = nullptr, const Primitive **outHitPrim = nullptr,
-				   float cameraFovY = 0.0f, int imageHeight = 0)
+				   float cameraFovY = 0.0f, int imageHeight = 0,
+				   Vec3 *outAlbedo = nullptr, Vec3 *outP = nullptr, Vec2 *outUV = nullptr)
 	{
 		// Primary-ray AOV capture defaults - overwritten below on a primary-ray
 		// hit (i == 0). Left at these sentinels on a primary-ray miss, so a
@@ -402,6 +403,9 @@ namespace Mirage
 		if (outDepth) *outDepth = 0.0f;
 		if (outNormal) *outNormal = Vec3(0.0f);
 		if (outHitPrim) *outHitPrim = nullptr;
+		if (outAlbedo) *outAlbedo = Vec3(0.0f);
+		if (outP) *outP = Vec3(0.0f);
+		if (outUV) *outUV = Vec2(0.0f);
 
 		// path throughput
 		Vec3 pathThroughput(1.0f, 1.0f, 1.0f);
@@ -508,13 +512,21 @@ namespace Mirage
 
 				if (i == 0)
 				{
-					// First-hit AOV capture - t/n/hit are the primary ray's
-					// hit distance, shading normal, and hit primitive, needed
-					// for the depth/normal/primId AOVs regardless of which
-					// light-sampling code path below actually runs.
+					// First-hit AOV capture - t/n/hit/p/hitUV are the primary
+					// ray's hit distance, shading normal, hit primitive,
+					// world position, and surface UV, needed for the
+					// depth/normal/primId/albedo/P/uv AOVs regardless of
+					// which light-sampling code path below actually runs.
+					// hitMaterial.color is already the fully texture-resolved
+					// base color at this point (see the SampleTextureRGB
+					// call above), so albedo capture is a direct read, not
+					// new shading work.
 					if (outDepth) *outDepth = t;
 					if (outNormal) *outNormal = n;
 					if (outHitPrim) *outHitPrim = hit;
+					if (outAlbedo) *outAlbedo = hitMaterial.color;
+					if (outP) *outP = p;
+					if (outUV) *outUV = hitUV;
 				}
 
 #if USE_LIGHT_SAMPLING
@@ -748,13 +760,21 @@ namespace Mirage
 							float hitDepth = 0.0f;
 							Vec3 hitNormal;
 							const Primitive *hitPrim = nullptr;
-							bool wantAovs = (aovs != nullptr) && (options.aovMask != 0) && (k == 0);
+							Vec3 hitAlbedo;
+							Vec3 hitP;
+							Vec2 hitAovUV;
+							bool haveNamedAovs = (aovs != nullptr) && !aovs->named.empty();
+							bool wantAovs = (aovs != nullptr) && (options.aovMask != 0 || haveNamedAovs) &&
+											(options.accumulateAovs || k == 0);
 
 							Vec3 sample = PathTrace(*scene, origin, dir, time, options.maxDepth, rand,
 													 wantAovs ? &hitDepth : nullptr,
 													 wantAovs ? &hitNormal : nullptr,
 													 wantAovs ? &hitPrim : nullptr,
-													 camera.EffectiveFov(), options.height);
+													 camera.EffectiveFov(), options.height,
+													 wantAovs ? &hitAlbedo : nullptr,
+													 wantAovs ? &hitP : nullptr,
+													 wantAovs ? &hitAovUV : nullptr);
 
 							AddSample(output, options.width, options.height, x, y, options.clamp, options.filter, sample);
 
@@ -762,19 +782,72 @@ namespace Mirage
 							{
 								// Direct per-pixel write (own index, no filter
 								// splat) - unlike AddSample's antialiasing
-								// scatter, depth/normal/primId are discrete
-								// single-valued snapshots that must not blur
-								// across neighboring pixels. Only captured on
-								// the first sample (k == 0) so AA jitter across
-								// samples can't perturb which primitive/depth
-								// gets reported near silhouette edges.
+								// scatter, AOVs are discrete per-pixel
+								// snapshots that must not blur across
+								// neighboring pixels.
+								//
+								// Default (Options::accumulateAovs == false,
+								// preserving every pre-existing call site's
+								// behavior): captured on the first sample
+								// (k == 0) only, so AA jitter across samples
+								// can't perturb which primitive/depth gets
+								// reported near silhouette edges - wantAovs
+								// above is only ever true at k == 0 in this
+								// mode, so `blend` below reduces to a plain
+								// overwrite (see its comment).
+								//
+								// Opt-in (accumulateAovs == true): continuous-
+								// valued AOVs (depth/normal/albedo/P/uv)
+								// instead accumulate a running per-pixel mean
+								// across all samples, the same antialiasing
+								// benefit the beauty buffer gets. primId is
+								// deliberately exempted - it's a discrete/
+								// categorical value (a primitive index), and
+								// averaging it across samples that may hit
+								// different primitives near silhouette edges
+								// would produce a meaningless intermediate ID,
+								// not a useful antialiased ID pass - so it
+								// always stays first-sample-only regardless of
+								// this flag, same as before.
 								int idx = j * options.width + i;
+
+								auto blend = [k](Color *buffer, int bufIdx, const Color &value) {
+									// (k + 1) == 1 at k == 0, so this is a
+									// direct overwrite on the first sample
+									// regardless of the buffer's prior
+									// contents - the caller-owned buffer
+									// doesn't need pre-zeroing.
+									if (k == 0)
+										buffer[bufIdx] = value;
+									else
+										buffer[bufIdx] = buffer[bufIdx] + (value - buffer[bufIdx]) / float(k + 1);
+								};
+
 								if ((options.aovMask & kAovDepth) && aovs->depth)
-									aovs->depth[idx] = Color(hitDepth, 0.0f, 0.0f, 1.0f);
+									blend(aovs->depth, idx, Color(hitDepth, 0.0f, 0.0f, 1.0f));
 								if ((options.aovMask & kAovNormal) && aovs->normal)
-									aovs->normal[idx] = Color(hitNormal.x, hitNormal.y, hitNormal.z, 1.0f);
-								if ((options.aovMask & kAovPrimId) && aovs->primId)
+									blend(aovs->normal, idx, Color(hitNormal.x, hitNormal.y, hitNormal.z, 1.0f));
+								if ((options.aovMask & kAovPrimId) && aovs->primId && k == 0)
 									aovs->primId[idx] = Color(hitPrim ? (float)hitPrim->hydraId : -1.0f, 0.0f, 0.0f, 1.0f);
+								if ((options.aovMask & kAovAlbedo) && aovs->albedo)
+									blend(aovs->albedo, idx, Color(hitAlbedo.x, hitAlbedo.y, hitAlbedo.z, 1.0f));
+
+								// Tier B / arbitrary AOVs (NamedAov, see
+								// Renderer.h) - "P" (world-space hit position)
+								// and "uv" (surface UV in .xy) are the only
+								// names currently recognized; anything else is
+								// silently left unpopulated, matching
+								// AovBuffers' existing "not populated"
+								// convention for a null pointer.
+								for (const NamedAov &namedAov : aovs->named)
+								{
+									if (namedAov.buffer == nullptr)
+										continue;
+									if (namedAov.name == "P")
+										blend(namedAov.buffer, idx, Color(hitP.x, hitP.y, hitP.z, 1.0f));
+									else if (namedAov.name == "uv")
+										blend(namedAov.buffer, idx, Color(hitAovUV.x, hitAovUV.y, 0.0f, 1.0f));
+								}
 							}
 
 							break;

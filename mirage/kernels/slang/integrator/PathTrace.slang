@@ -42,7 +42,7 @@ float MipLevelFromHitDistance(float hitT, float cameraFovY, uint imageHeight, in
 // default (mip level always 0).
 float3 PathTrace(float3 startOrigin, float3 startDir, float time, int maxDepth, uint numScenePrims, uint numLights,
                   float cameraFovY, uint imageHeight, inout Random rand,
-                  out float outDepth, out float3 outNormal, out int outPrimId)
+                  out float outDepth, out float3 outNormal, out int outPrimId, out float3 outAlbedo)
 {
     // Primary-ray AOV capture defaults - overwritten below on a primary-ray
     // hit (i == 0). Left at these sentinels on a primary-ray miss, mirroring
@@ -50,6 +50,7 @@ float3 PathTrace(float3 startOrigin, float3 startDir, float time, int maxDepth, 
     outDepth = 0.0f;
     outNormal = float3(0.0f);
     outPrimId = -1;
+    outAlbedo = float3(0.0f);
 
     float3 pathThroughput = float3(1.0f, 1.0f, 1.0f);
     float3 totalRadiance = float3(0.0f, 0.0f, 0.0f);
@@ -127,6 +128,10 @@ float3 PathTrace(float3 startOrigin, float3 startDir, float time, int maxDepth, 
                 outDepth = t;
                 outNormal = n;
                 outPrimId = hitPrim.hydraId;
+                // hitMaterial.color is already texture-resolved above
+                // (Material_SampleAlbedo), same "direct read of an existing
+                // local, no new shading work" reasoning as the CPU mirror.
+                outAlbedo = hitMaterial.color;
 
                 totalRadiance += hitMaterial.emission;
             }

@@ -6,6 +6,8 @@
 #include <memory>
 #include <algorithm>
 #include <cctype>
+#include <cstring>
+#include <utility>
 #include <filesystem>
 
 // Mirage includes
@@ -1160,6 +1162,107 @@ bool WriteExr(const std::string &path, const Color *pixels, int width, int heigh
     return true;
 }
 
+// Multi-layer float32 EXR writer: beauty plus whichever AovType bits are set
+// in `aovMask` (Tier B/NamedAov AOVs aren't wired into this writer yet - see
+// Renderer.h's NamedAov comment; only the fixed AovType set is supported
+// here). Uses tinyexr's full EXRHeader/EXRImage API (SaveEXR() above only
+// wraps the single flat-RGBA case) with "layer.channel" channel naming -
+// bare R/G/B/A for the beauty layer (no prefix, so ordinary single-layer EXR
+// viewers/readers see it exactly like WriteExr's output), "depth.Z"
+// (scalar), "normal.X/Y/Z", "albedo.R/G/B" for AOV layers - matching the
+// convention most compositors (Nuke, Blender, etc.) expect for multi-AOV
+// EXRs. Only layers whose AovType bit is set (and whose AovBuffers pointer
+// is non-null) are written, so a single-AOV request produces a small
+// beauty+one-layer file, not a fixed maximal channel set.
+bool WriteMultiLayerExr(const std::string &path, const Color *beauty, const AovBuffers &aovs, uint32_t aovMask, int width, int height)
+{
+    struct Layer
+    {
+        std::string name; // "" for the beauty layer (no "layer." prefix)
+        std::vector<std::pair<std::string, int>> channels; // {suffix, Color component index 0..3}
+        const Color *buffer;
+    };
+
+    std::vector<Layer> layers;
+    // (A)BGR order, matching SaveEXR()'s own convention above - "most EXR
+    // viewers expect this channel order" per tinyexr's SaveEXR comment.
+    layers.push_back({"", {{"A", 3}, {"B", 2}, {"G", 1}, {"R", 0}}, beauty});
+    if ((aovMask & kAovDepth) && aovs.depth)
+        layers.push_back({"depth", {{"Z", 0}}, aovs.depth}); // AovBuffers::depth's .x holds hit distance
+    if ((aovMask & kAovNormal) && aovs.normal)
+        layers.push_back({"normal", {{"Z", 2}, {"Y", 1}, {"X", 0}}, aovs.normal});
+    if ((aovMask & kAovPrimId) && aovs.primId)
+        layers.push_back({"primId", {{"Z", 0}}, aovs.primId}); // .x holds (float)Primitive::hydraId
+    if ((aovMask & kAovAlbedo) && aovs.albedo)
+        layers.push_back({"albedo", {{"B", 2}, {"G", 1}, {"R", 0}}, aovs.albedo});
+
+    size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+
+    // SoA per-channel float arrays - tinyexr's EXRImage::images layout, not
+    // WriteExr's interleaved RGBA (see SaveEXR()'s own "Split ... into R, G
+    // and B(and A) layers" comment above for the same transform on the
+    // single-layer path).
+    std::vector<std::vector<float>> channelData;
+    std::vector<std::string> channelNames;
+    for (const Layer &layer : layers)
+    {
+        for (const auto &[suffix, component] : layer.channels)
+        {
+            std::vector<float> data(pixelCount);
+            for (size_t i = 0; i < pixelCount; ++i)
+                data[i] = layer.buffer[i][component];
+            channelData.push_back(std::move(data));
+            channelNames.push_back(layer.name.empty() ? suffix : (layer.name + "." + suffix));
+        }
+    }
+
+    int numChannels = static_cast<int>(channelNames.size());
+
+    EXRHeader header;
+    InitEXRHeader(&header);
+    header.compression_type = (width < 16 && height < 16) ? TINYEXR_COMPRESSIONTYPE_NONE : TINYEXR_COMPRESSIONTYPE_ZIP;
+    header.num_channels = numChannels;
+    header.channels = static_cast<EXRChannelInfo *>(malloc(sizeof(EXRChannelInfo) * static_cast<size_t>(numChannels)));
+    header.pixel_types = static_cast<int *>(malloc(sizeof(int) * static_cast<size_t>(numChannels)));
+    header.requested_pixel_types = static_cast<int *>(malloc(sizeof(int) * static_cast<size_t>(numChannels)));
+    for (int i = 0; i < numChannels; ++i)
+    {
+        // channelNames entries are always short ("albedo.R" etc.), well
+        // under EXRChannelInfo::name's 255-byte limit - no truncation risk.
+        std::memset(header.channels[i].name, 0, sizeof(header.channels[i].name));
+        std::strncpy(header.channels[i].name, channelNames[i].c_str(), sizeof(header.channels[i].name) - 1);
+        header.pixel_types[i] = TINYEXR_PIXELTYPE_FLOAT;
+        header.requested_pixel_types[i] = TINYEXR_PIXELTYPE_FLOAT; // full float32, no half-precision downcast
+    }
+
+    std::vector<float *> imagePtrs(numChannels);
+    for (int i = 0; i < numChannels; ++i)
+        imagePtrs[i] = channelData[i].data();
+
+    EXRImage image;
+    InitEXRImage(&image);
+    image.num_channels = numChannels;
+    image.images = reinterpret_cast<unsigned char **>(imagePtrs.data());
+    image.width = width;
+    image.height = height;
+
+    const char *err = nullptr;
+    int ret = SaveEXRImageToFile(&image, &header, path.c_str(), &err);
+
+    free(header.channels);
+    free(header.pixel_types);
+    free(header.requested_pixel_types);
+
+    if (ret != TINYEXR_SUCCESS)
+    {
+        MIRAGE_LOG_ERROR("Failed to save multi-layer EXR: {}", (err ? err : "unknown error"));
+        if (err)
+            FreeEXRErrorMessage(err);
+        return false;
+    }
+    return true;
+}
+
 // Main function
 int main(int argc, char *argv[])
 {
@@ -1170,14 +1273,17 @@ int main(int argc, char *argv[])
 
     // No existing flag-parsing infrastructure here (this CLI has always been
     // purely positional - <scene_file> <output_image> [width] [height]
-    // [samples]) so --log-level is stripped out of argv in its own pass
-    // before positional parsing below, rather than threading a real option
-    // parser through this whole function for one flag.
+    // [samples]) so each --flag[=value] below is stripped out of argv in its
+    // own pass before positional parsing, rather than threading a real
+    // option parser through this whole function for a handful of flags.
     Mirage::Logging::Level logLevel = Mirage::Logging::Level::eInfo;
+    Mirage::ViewTransform viewTransform = Mirage::ViewTransform::eFilmic;
+    uint32_t aovMask = 0;
     std::vector<std::string> args;
     for (int i = 0; i < argc; ++i)
     {
         std::string arg = argv[i];
+
         static const std::string kLogLevelEq = "--log-level=";
         if (arg.rfind(kLogLevelEq, 0) == 0 || arg == "--log-level")
         {
@@ -1203,6 +1309,86 @@ int main(int argc, char *argv[])
             }
             continue;
         }
+
+        static const std::string kViewTransformEq = "--view-transform=";
+        if (arg.rfind(kViewTransformEq, 0) == 0 || arg == "--view-transform")
+        {
+            std::string value;
+            if (arg == "--view-transform")
+            {
+                if (i + 1 >= argc)
+                {
+                    MIRAGE_LOG_ERROR("--view-transform requires a value (filmic|aces|srgb|none)");
+                    return 1;
+                }
+                value = argv[++i];
+            }
+            else
+            {
+                value = arg.substr(kViewTransformEq.size());
+            }
+
+            if (value == "filmic")
+                viewTransform = Mirage::ViewTransform::eFilmic;
+            else if (value == "aces")
+                viewTransform = Mirage::ViewTransform::eAcesLike;
+            else if (value == "srgb")
+                viewTransform = Mirage::ViewTransform::eSrgbDisplay;
+            else if (value == "none")
+                viewTransform = Mirage::ViewTransform::eNone;
+            else
+            {
+                MIRAGE_LOG_ERROR("Unrecognized --view-transform value '{}' (want filmic|aces|srgb|none)", value);
+                return 1;
+            }
+            continue;
+        }
+
+        // Comma-separated AOV names, e.g. --aovs depth,normal,albedo. Only
+        // takes effect for .exr output (see the multi-layer EXR writer
+        // below) - non-EXR output stays beauty-only, matching every other
+        // AOV consumer today (only HydraCompatibility.cpp reads AovBuffers
+        // at all; scene_renderer had zero AOV support before this flag).
+        static const std::string kAovsEq = "--aovs=";
+        if (arg.rfind(kAovsEq, 0) == 0 || arg == "--aovs")
+        {
+            std::string value;
+            if (arg == "--aovs")
+            {
+                if (i + 1 >= argc)
+                {
+                    MIRAGE_LOG_ERROR("--aovs requires a value (comma-separated: depth,normal,primid,albedo)");
+                    return 1;
+                }
+                value = argv[++i];
+            }
+            else
+            {
+                value = arg.substr(kAovsEq.size());
+            }
+
+            std::istringstream aovStream(value);
+            std::string aovName;
+            while (std::getline(aovStream, aovName, ','))
+            {
+                aovName = trim(aovName);
+                if (aovName == "depth")
+                    aovMask |= Mirage::kAovDepth;
+                else if (aovName == "normal")
+                    aovMask |= Mirage::kAovNormal;
+                else if (aovName == "primid")
+                    aovMask |= Mirage::kAovPrimId;
+                else if (aovName == "albedo")
+                    aovMask |= Mirage::kAovAlbedo;
+                else
+                {
+                    MIRAGE_LOG_ERROR("Unrecognized --aovs name '{}' (want depth|normal|primid|albedo)", aovName);
+                    return 1;
+                }
+            }
+            continue;
+        }
+
         args.push_back(arg);
     }
 
@@ -1212,7 +1398,7 @@ int main(int argc, char *argv[])
     if (args.size() < 3)
     {
         MIRAGE_LOG_ERROR(
-            "Usage: {} [--log-level trace|debug|info|warn|error|critical] <scene_file> <output_image> [width] [height] [samples]",
+            "Usage: {} [--log-level trace|debug|info|warn|error|critical] [--view-transform filmic|aces|srgb|none] [--aovs depth,normal,primid,albedo] <scene_file> <output_image> [width] [height] [samples]",
             args.empty() ? "scene_renderer" : args[0]);
         return 1;
     }
@@ -1291,6 +1477,7 @@ int main(int argc, char *argv[])
     options.exposure = 1.0f;
     options.clamp = 10.0f;
     options.enableDOF = false;
+    options.aovMask = aovMask;
 
     // Compose the manual exposure multiplier above with any physically-
     // derived one from the camera's fStop/shutterSpeed/iso (see
@@ -1303,11 +1490,38 @@ int main(int argc, char *argv[])
     MIRAGE_LOG_DEBUG("Debug: Allocating memory for output image");
     std::vector<Color> outputImage(width * height, Color(0.0f));
 
+    // AOV backing storage - only allocated for buffers --aovs actually
+    // requested (aovMask's set bits), so a beauty-only render (the default,
+    // aovMask == 0) allocates nothing extra, matching every pre-existing
+    // call site's behavior.
+    AovBuffers aovs;
+    std::vector<Color> aovDepthBuf, aovNormalBuf, aovPrimIdBuf, aovAlbedoBuf;
+    if (aovMask & kAovDepth)
+    {
+        aovDepthBuf.assign(width * height, Color(0.0f));
+        aovs.depth = aovDepthBuf.data();
+    }
+    if (aovMask & kAovNormal)
+    {
+        aovNormalBuf.assign(width * height, Color(0.0f));
+        aovs.normal = aovNormalBuf.data();
+    }
+    if (aovMask & kAovPrimId)
+    {
+        aovPrimIdBuf.assign(width * height, Color(0.0f));
+        aovs.primId = aovPrimIdBuf.data();
+    }
+    if (aovMask & kAovAlbedo)
+    {
+        aovAlbedoBuf.assign(width * height, Color(0.0f));
+        aovs.albedo = aovAlbedoBuf.data();
+    }
+
     // Render the scene
     MIRAGE_LOG_DEBUG("Debug: Starting rendering");
     try
     {
-        renderer->Render(*scene.camera, options, outputImage.data());
+        renderer->Render(*scene.camera, options, outputImage.data(), aovMask != 0 ? &aovs : nullptr);
         MIRAGE_LOG_DEBUG("Debug: Rendering completed");
     }
     catch (const std::exception &e)
@@ -1332,19 +1546,44 @@ int main(int argc, char *argv[])
     {
         // Full float32, untonemapped output - skip the 8-bit LDR conversion
         // below entirely, tonemapping/quantization are LDR-only concerns.
-        MIRAGE_LOG_DEBUG("Debug: Writing float EXR output");
-        success = WriteExr(outputFile, outputImage.data(), width, height);
+        if (aovMask != 0)
+        {
+            MIRAGE_LOG_DEBUG("Debug: Writing multi-layer float EXR output (beauty + AOVs)");
+            success = WriteMultiLayerExr(outputFile, outputImage.data(), aovs, aovMask, width, height);
+        }
+        else
+        {
+            MIRAGE_LOG_DEBUG("Debug: Writing float EXR output");
+            success = WriteExr(outputFile, outputImage.data(), width, height);
+        }
     }
     else
     {
+        if (aovMask != 0)
+        {
+            // AOVs need per-channel layers, which only EXR supports here -
+            // matches WriteMultiLayerExr's doc comment. Beauty still writes
+            // normally below; the requested AOVs are just silently dropped
+            // from a non-EXR output rather than erroring the whole render.
+            MIRAGE_LOG_WARN("--aovs was requested but output extension '{}' isn't EXR - AOVs need per-channel EXR "
+                             "output, only the beauty image will be written",
+                             extension);
+        }
+
         // Convert the rendered image to 8-bit RGB for saving
         MIRAGE_LOG_DEBUG("Debug: Converting image for saving");
         std::vector<unsigned char> imageData(width * height * 3);
 
         for (int i = 0; i < width * height; i++)
         {
-            // Apply tone mapping and convert to sRGB
-            Color pixel = ToneMap(outputImage[i], options.exposure);
+            // Apply the selected view transform (exposure + tonemap +
+            // display encode all handled inside ApplyViewTransform) - was
+            // previously a hardcoded ToneMap(outputImage[i], options.exposure)
+            // call, which (a) fed options.exposure into ToneMap's `limit`
+            // parameter, dead until this change, so exposure never actually
+            // had any visible effect before now, and (b) never gave callers
+            // a way to pick ToneMapACES or a plain sRGB display transform.
+            Color pixel = ApplyViewTransform(outputImage[i], viewTransform, options.exposure);
 
             // Convert to 8-bit RGB
             int r = int(255.0f * Clamp(pixel.x, 0.0f, 1.0f));

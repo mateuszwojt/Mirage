@@ -54,9 +54,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     float outDepth;
     float3 outNormal;
     int outPrimId;
+    float3 outAlbedo;
     float3 sample = PathTrace(origin, dir, time, frame.maxDepth, frame.numPrimitives, frame.numLights,
                                cam.fovY, frame.height, rand,
-                               outDepth, outNormal, outPrimId);
+                               outDepth, outNormal, outPrimId, outAlbedo);
 
     AddSample(pixelIndex, frame.clampValue, sample);
 
@@ -66,4 +67,5 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     g_AovDepth[pixelIndex] = float4(outDepth, 0.0f, 0.0f, 1.0f);
     g_AovNormal[pixelIndex] = float4(outNormal, 1.0f);
     g_AovPrimId[pixelIndex] = float4(float(outPrimId), 0.0f, 0.0f, 1.0f);
+    g_AovAlbedo[pixelIndex] = float4(outAlbedo, 1.0f);
 }

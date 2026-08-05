@@ -25,7 +25,9 @@ add_executable(mirage_unit_tests
     unit/TestMain.cpp
     unit/ColorTest.cpp
     unit/AovTest.cpp
+    unit/AovRenderTest.cpp
     unit/LogTest.cpp
+    unit/ViewTransformTest.cpp
 )
 
 target_include_directories(mirage_unit_tests PRIVATE ${CMAKE_SOURCE_DIR})

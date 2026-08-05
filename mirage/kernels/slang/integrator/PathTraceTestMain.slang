@@ -52,11 +52,12 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     float unusedDepth;
     float3 unusedNormal;
     int unusedPrimId;
+    float3 unusedAlbedo;
 
     PathTraceTestResult result;
     result.radiance = PathTrace(tc.origin, tc.dir, tc.time, tc.maxDepth, tc.numPrimitives, tc.numLights,
                                  tc.cameraFovY, tc.imageHeight, rand,
-                                 unusedDepth, unusedNormal, unusedPrimId);
+                                 unusedDepth, unusedNormal, unusedPrimId, unusedAlbedo);
 
     g_Results[i] = result;
 }

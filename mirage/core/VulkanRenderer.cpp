@@ -169,11 +169,12 @@ namespace Mirage
         int accumWidth = 0, accumHeight = 0;
         uint32_t accumulatedSamples = 0;
 
-        // First-hit AOV buffers (depth/normal/primId) - same size/lifetime as
-        // accumBuffer, reallocated together in AllocateAccumBuffer(). Unlike
-        // accumBuffer these hold a single-valued snapshot, not a progressive
-        // sum, but they still need per-dimension (re)allocation the same way.
-        ComPtr<IBuffer> depthBuffer, normalBuffer, primIdBuffer;
+        // First-hit AOV buffers (depth/normal/primId/albedo) - same
+        // size/lifetime as accumBuffer, reallocated together in
+        // AllocateAccumBuffer(). Unlike accumBuffer these hold a
+        // single-valued snapshot, not a progressive sum, but they still need
+        // per-dimension (re)allocation the same way.
+        ComPtr<IBuffer> depthBuffer, normalBuffer, primIdBuffer, albedoBuffer;
 
         bool CreateDevice()
         {
@@ -796,6 +797,7 @@ namespace Mirage
             device->createBuffer(desc, zeros.data(), depthBuffer.writeRef());
             device->createBuffer(desc, zeros.data(), normalBuffer.writeRef());
             device->createBuffer(desc, zeros.data(), primIdBuffer.writeRef());
+            device->createBuffer(desc, zeros.data(), albedoBuffer.writeRef());
             accumWidth = w;
             accumHeight = h;
             accumulatedSamples = 0;
@@ -881,6 +883,7 @@ namespace Mirage
                 cursor["g_AovDepth"].setBinding(depthBuffer);
                 cursor["g_AovNormal"].setBinding(normalBuffer);
                 cursor["g_AovPrimId"].setBinding(primIdBuffer);
+                cursor["g_AovAlbedo"].setBinding(albedoBuffer);
 
                 uint32_t groupsX = ((uint32_t)options.width + 7) / 8;
                 uint32_t groupsY = ((uint32_t)options.height + 7) / 8;
@@ -932,6 +935,27 @@ namespace Mirage
                 ComPtr<ISlangBlob> rb;
                 if (SLANG_SUCCEEDED(device->readBuffer(primIdBuffer, 0, aovSize, rb.writeRef())) && rb)
                     memcpy(aovs->primId, rb->getBufferPointer(), aovSize);
+            }
+            if (aovs && (options.aovMask & kAovAlbedo) && aovs->albedo)
+            {
+                ComPtr<ISlangBlob> rb;
+                if (SLANG_SUCCEEDED(device->readBuffer(albedoBuffer, 0, aovSize, rb.writeRef())) && rb)
+                    memcpy(aovs->albedo, rb->getBufferPointer(), aovSize);
+            }
+            // Tier B / arbitrary named AOVs (NamedAov, see Renderer.h) are
+            // CPU-backend only today - the GPU kernel doesn't compute
+            // per-name outputs at all (only the fixed AovType set above),
+            // so leave every NamedAov::buffer untouched here rather than
+            // silently returning garbage, and warn once per call so a
+            // caller that requested one on the GPU backend has a way to
+            // notice instead of silently getting an unpopulated buffer.
+            if (aovs && !aovs->named.empty())
+            {
+                MIRAGE_LOG_WARN(
+                    "VulkanRenderer: {} named AOV(s) requested but the GPU/Vulkan backend only "
+                    "supports the fixed AovType set (depth/normal/primId/albedo) today - named "
+                    "AOVs are CPU-backend only, see Renderer.h's NamedAov comment",
+                    aovs->named.size());
             }
         }
 

@@ -87,3 +87,4 @@ uniform RWStructuredBuffer<float4> g_AccumBuffer;
 uniform RWStructuredBuffer<float4> g_AovDepth;
 uniform RWStructuredBuffer<float4> g_AovNormal;
 uniform RWStructuredBuffer<float4> g_AovPrimId;
+uniform RWStructuredBuffer<float4> g_AovAlbedo;

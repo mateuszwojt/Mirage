@@ -99,16 +99,35 @@ namespace Mirage
 		return s.u32;
 	}
 
+	// Correct piecewise sRGB OETF (encode: linear -> display) / EOTF (decode:
+	// display -> linear) - the IEC 61966-2-1 curve, not a naive pow(c, 2.2)/
+	// pow(c, 1/2.2) gamma approximation. This used to be duplicated as two
+	// disagreeing implementations - a correct piecewise decode private to
+	// mirage/shaders/TextureLoader.cpp, and a separate naive-pow pair here -
+	// unified here as the one sRGB implementation both now share (see
+	// docs/PRODUCTION_READINESS.md's Tier 3 "no color management" finding).
+	CUDA_CALLABLE inline float LinearToSrgb(float c)
+	{
+		if (c <= 0.0031308f)
+			return c * 12.92f;
+		return 1.055f * powf(c, 1.0f / 2.4f) - 0.055f;
+	}
+
+	CUDA_CALLABLE inline float SrgbToLinear(float c)
+	{
+		if (c <= 0.04045f)
+			return c / 12.92f;
+		return powf((c + 0.055f) / 1.055f, 2.4f);
+	}
+
 	CUDA_CALLABLE inline Color LinearToSrgb(const Color &c)
 	{
-		const float kInvGamma = 1.0f / 2.2f;
-		return Color(powf(c.x, kInvGamma), powf(c.y, kInvGamma), powf(c.z, kInvGamma), c.w);
+		return Color(LinearToSrgb(c.x), LinearToSrgb(c.y), LinearToSrgb(c.z), c.w);
 	}
 
 	CUDA_CALLABLE inline Color SrgbToLinear(const Color &c)
 	{
-		const float kInvGamma = 2.2f;
-		return Color(powf(c.x, kInvGamma), powf(c.y, kInvGamma), powf(c.z, kInvGamma), c.w);
+		return Color(SrgbToLinear(c.x), SrgbToLinear(c.y), SrgbToLinear(c.z), c.w);
 	}
 
 	CUDA_CALLABLE inline float Luminance(const Color &c)
