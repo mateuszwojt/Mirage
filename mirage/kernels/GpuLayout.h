@@ -39,16 +39,17 @@ namespace Mirage
     };
     static_assert(sizeof(GpuBVHNode) == 32, "GpuBVHNode must match BVHNode's 32-byte layout");
 
-    // Mirrors prims/Primitive.h's Primitive. unionData holds sphere radius (.x)
-    // or plane equation (xyzw); meshIndex indexes GpuMeshDescriptor when
-    // type == eMesh; materialIndex indexes g_Materials (one GpuMaterial per
-    // primitive - no dedup, matching one-material-per-Primitive on the CPU side).
+    // Mirrors prims/Primitive.h's Primitive. unionData holds sphere radius (.x),
+    // plane equation (xyzw), rect width/height (.x/.y), or disk radius (.x);
+    // meshIndex indexes GpuMeshDescriptor when type == eMesh; materialIndex
+    // indexes g_Materials (one GpuMaterial per primitive - no dedup, matching
+    // one-material-per-Primitive on the CPU side).
     struct GpuPrimitive
     {
         GpuTransform startTransform;
         GpuTransform endTransform;
         float unionDataX, unionDataY, unionDataZ, unionDataW;
-        int32_t type; // matches Mirage::Type (eSphere=0, ePlane=1, eMesh=2)
+        int32_t type; // matches Mirage::Type (eSphere=0, ePlane=1, eMesh=2, eRect=3, eDisk=4)
         int32_t meshIndex; // -1 if type != eMesh
         int32_t lightSamples;
         int32_t materialIndex;
@@ -85,6 +86,10 @@ namespace Mirage
     // utils/Util.h's CameraSampler constructor output) - avoids porting
     // quaternion camera math to the GPU. rasterToWorld is column-major,
     // matching math/Mat44.h's existing storage (cols[4][4]) byte-for-byte.
+    // fovY (Tier-2 "mipmapping") is Camera::EffectiveFov()'s resolved
+    // vertical FOV in radians - appended, not interleaved, purely so
+    // PathTrace.slang's mip-level heuristic can derive a pixel's angular
+    // size without re-deriving it from rasterToWorld.
     struct GpuCamera
     {
         float rasterToWorld[16];
@@ -93,8 +98,9 @@ namespace Mirage
         float focalPoint;
         uint32_t enableDOF;
         float shutterStart, shutterEnd;
+        float fovY;
     };
-    static_assert(sizeof(GpuCamera) == 64 + 12 + 4 + 4 + 4 + 8, "GpuCamera layout drifted");
+    static_assert(sizeof(GpuCamera) == 64 + 12 + 4 + 4 + 4 + 8 + 4, "GpuCamera layout drifted");
 
     // Per-dispatch uniform. sampleIndex/frameSeed drive PathTraceMain.slang's
     // per-pixel RNG seeding for progressive accumulation (see the plan's "Path
@@ -102,7 +108,8 @@ namespace Mirage
     // CPU's single shared sequential Random stream, so per-pixel noise patterns
     // are not expected to match between CPU and GPU renders (only the BSDF/
     // PathTrace *functions* are validated bit-close, via explicitly-seeded unit
-    // tests - see GpuPathTraceTestCase below).
+    // tests - see GpuPathTraceTestCase below). numLights (Tier-2 "punctual
+    // lights") appended, not interleaved - existing field offsets unchanged.
     struct GpuFrameParams
     {
         uint32_t width;
@@ -112,8 +119,42 @@ namespace Mirage
         uint32_t frameSeed;
         uint32_t sampleIndex;
         float clampValue;
+        uint32_t numLights;
     };
-    static_assert(sizeof(GpuFrameParams) == 28, "GpuFrameParams layout drifted");
+    static_assert(sizeof(GpuFrameParams) == 28 + 4, "GpuFrameParams layout drifted");
+
+    // Per-material-texture-slot metadata (Tier-2 "mipmapping"/"UDIM") -
+    // parallel to Material.slang's g_Textures[kMaxMaterialTextures], indexed
+    // the same way (by GpuMaterial's xxxTextureIndex fields). width/height
+    // let PathTrace.slang's mip-level heuristic convert a world-space
+    // texture footprint into a mip level; udimGridWidth/Height (1/1 = "not
+    // a UDIM atlas") let Material_Sample* remap uv into atlas space before
+    // sampling - see TextureSampling.h's UdimAtlasUV for the CPU mirror.
+    struct GpuTextureInfo
+    {
+        int32_t width;
+        int32_t height;
+        int32_t udimGridWidth;
+        int32_t udimGridHeight;
+    };
+    static_assert(sizeof(GpuTextureInfo) == 16, "GpuTextureInfo layout drifted");
+
+    // Mirrors lights/PunctualLight.h's PunctualLight - point/directional
+    // delta-distribution lights, deliberately not part of GpuPrimitive (see
+    // that struct's CPU-side comment - no area, no intersection geometry).
+    // See kernels/slang/scene/PunctualLight.slang for the byte-identical
+    // Slang struct.
+    struct GpuLight
+    {
+        float posX, posY, posZ;
+        float dirX, dirY, dirZ;
+        float colorX, colorY, colorZ;
+        float intensity;
+        float radius;
+        float angle;
+        int32_t type; // matches PunctualLightType (ePoint=0, eDirectional=1)
+    };
+    static_assert(sizeof(GpuLight) == 36 + 12 + 4, "GpuLight layout drifted");
 
     // Mirrors the Disney-BSDF-relevant fields of shaders/Material.h, plus (as
     // of M8) the three texture-index fields added there, plus (Tier-1
@@ -196,6 +237,13 @@ namespace Mirage
     // CPU-vs-GPU comparison possible here - see the plan's note that
     // per-pixel-hashed RNG streams intentionally differ between the CPU and GPU
     // renderers and are not meant to match bit-for-bit.
+    // numLights (Tier-2 "punctual lights") and cameraFovY/imageHeight
+    // (Tier-2 "mipmapping" - see PathTrace.slang's MipLevelFromHitDistance)
+    // appended, not interleaved - existing field offsets unchanged. Every
+    // existing test-case construction site value-initializes with `{}`
+    // before setting fields by name, so numLights/cameraFovY/imageHeight
+    // default to 0 (no punctual lights, mip heuristic disabled - always
+    // mip level 0) for every pre-existing test.
     struct GpuPathTraceTestCase
     {
         float originX, originY, originZ;
@@ -204,8 +252,11 @@ namespace Mirage
         int32_t maxDepth;
         uint32_t seed;
         uint32_t numPrimitives;
+        uint32_t numLights;
+        float cameraFovY;
+        uint32_t imageHeight;
     };
-    static_assert(sizeof(GpuPathTraceTestCase) == 40, "GpuPathTraceTestCase layout drifted");
+    static_assert(sizeof(GpuPathTraceTestCase) == 40 + 4 + 8, "GpuPathTraceTestCase layout drifted");
 
     struct GpuPathTraceTestResult
     {

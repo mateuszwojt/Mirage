@@ -18,7 +18,7 @@ namespace Mirage
         }
     }
 
-    std::unique_ptr<Texture> LoadTextureFromFile(const std::string &path, TextureColorSpace colorSpace)
+    std::unique_ptr<Texture> LoadTextureFromFile(const std::string &path, TextureColorSpace colorSpace, bool generateMips)
     {
         int width = 0, height = 0, channelsInFile = 0;
         // Request 4 channels (RGBA) unconditionally - Texture::data's documented
@@ -64,6 +64,10 @@ namespace Mirage
         }
 
         stbi_image_free(pixels);
+
+        if (generateMips)
+            tex->GenerateMips();
+
         return tex;
     }
 }

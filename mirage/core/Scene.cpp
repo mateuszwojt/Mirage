@@ -9,6 +9,7 @@ namespace Mirage
         meshes.clear();
         primitives.clear();
         instancers.clear();
+        lights.clear();
         materials.clear();
         textures.clear();
         materialNameToIndex.clear();
@@ -143,6 +144,13 @@ namespace Mirage
                     break;
                 case eMesh:
                     prim.mesh = meshGeo;
+                    break;
+                case eRect:
+                    prim.rect.width = instancer.rectWidth;
+                    prim.rect.height = instancer.rectHeight;
+                    break;
+                case eDisk:
+                    prim.disk.radius = instancer.diskRadius;
                     break;
                 }
 

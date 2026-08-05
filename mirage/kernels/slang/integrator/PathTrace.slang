@@ -19,7 +19,29 @@ import NormalMapping;
 static const float kIntegratorBsdfSamples = 1.0f;
 static const float kIntegratorProbeSamples = 1.0f;
 
-float3 PathTrace(float3 startOrigin, float3 startDir, float time, int maxDepth, uint numScenePrims, inout Random rand,
+// Port of Renderer.cpp's MipLevelFromHitDistance - see that function's
+// comment for the full rationale (pragmatic footprint-from-hit-distance
+// heuristic, not true ray differentials).
+float MipLevelFromHitDistance(float hitT, float cameraFovY, uint imageHeight, int texWidth, int texHeight)
+{
+    if (cameraFovY <= 0.0f || imageHeight == 0u || texWidth <= 0 || texHeight <= 0)
+        return 0.0f;
+
+    float pixelAngularSize = 2.0f * tan(cameraFovY * 0.5f) / float(imageHeight);
+    float worldFootprint = hitT * pixelAngularSize;
+    float texelFootprint = worldFootprint * float(max(texWidth, texHeight));
+    return log2(max(1.0f, texelFootprint));
+}
+
+// cameraFovY/imageHeight (Tier-2 "mipmapping") mirror Renderer.cpp's
+// PathTrace() trailing optional params, except required here (see this
+// codebase's "no default Slang params" convention, noted on
+// Material_SampleAlbedo et al.) - callers with no camera/mip heuristic
+// available (PathTraceTestMain.slang's isolated tests) pass 0.0f/0u,
+// which MipLevelFromHitDistance above treats identically to the CPU
+// default (mip level always 0).
+float3 PathTrace(float3 startOrigin, float3 startDir, float time, int maxDepth, uint numScenePrims, uint numLights,
+                  float cameraFovY, uint imageHeight, inout Random rand,
                   out float outDepth, out float3 outNormal, out int outPrimId)
 {
     // Primary-ray AOV capture defaults - overwritten below on a primary-ray
@@ -57,13 +79,23 @@ float3 PathTrace(float3 startOrigin, float3 startDir, float time, int maxDepth, 
             // Texture overrides - built once here so every subsequent BSDF
             // call this iteration (direct, below, and indirect via
             // SampleLights) sees the same textured values. Mirrors
-            // Renderer.cpp's PathTrace() shadedMaterial block exactly.
+            // Renderer.cpp's PathTrace() shadedMaterial block exactly,
+            // including the mip-level heuristic (primary-ray-only, see
+            // MipLevelFromHitDistance's comment - indirect bounces sample
+            // mip 0).
+            float mipLevel = 0.0f;
+            if (i == 0 && hitMaterial.albedoTextureIndex >= 0)
+            {
+                GpuTextureInfo texInfo = g_TextureInfo[hitMaterial.albedoTextureIndex];
+                mipLevel = MipLevelFromHitDistance(t, cameraFovY, imageHeight, texInfo.width, texInfo.height);
+            }
+
             if (hitMaterial.albedoTextureIndex >= 0)
-                hitMaterial.color = Material_SampleAlbedo(hitMaterial, hitUV);
+                hitMaterial.color = Material_SampleAlbedo(hitMaterial, hitUV, mipLevel);
             if (hitMaterial.roughnessTextureIndex >= 0)
-                hitMaterial.roughness = Material_SampleRoughness(hitMaterial, hitUV);
+                hitMaterial.roughness = Material_SampleRoughness(hitMaterial, hitUV, mipLevel);
             if (hitMaterial.metallicTextureIndex >= 0)
-                hitMaterial.metallic = Material_SampleMetallic(hitMaterial, hitUV);
+                hitMaterial.metallic = Material_SampleMetallic(hitMaterial, hitUV, mipLevel);
 
             // Perturb the shading normal in place - every subsequent use of
             // `n` this iteration (AOV capture, SampleLights, BSDFSample/
@@ -117,7 +149,7 @@ float3 PathTrace(float3 startOrigin, float3 startDir, float time, int maxDepth, 
                 }
             }
 
-            totalRadiance += pathThroughput * SampleLights(p, n, n, hitMaterial, rayEta, outEta, -rayDir, rayTime, numScenePrims, rand);
+            totalRadiance += pathThroughput * SampleLights(p, n, n, hitMaterial, rayEta, outEta, -rayDir, rayTime, numScenePrims, numLights, rand);
 
             if (hitPrim.lightSamples != 0)
                 break;

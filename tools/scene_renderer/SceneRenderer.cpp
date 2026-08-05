@@ -22,6 +22,7 @@
 #include "mirage/math/Transform.h"
 #include "mirage/core/Renderer.h"
 #include "mirage/math/Color.h"
+#include "mirage/lights/Skylight.h"
 
 // STB Image Write for saving images
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -78,6 +79,136 @@ std::vector<std::string> split(const std::string &s, char delimiter)
 bool startsWith(const std::string &str, const std::string &prefix)
 {
     return str.size() >= prefix.size() && str.compare(0, prefix.size(), prefix) == 0;
+}
+
+// Loads a UDIM tile set into one composited atlas Texture (Tier-2 "UDIM") -
+// see TextureSampling.h's UdimAtlasUV / Material.slang's mirror for how the
+// atlas is sampled once loaded, and that comment's note on this loader's
+// tile-placement convention (tile (0,0) = the atlas's top-left cell in
+// memory, u right, v down - no vertical flip needed relative to the
+// sampler). `patternPath` must contain the literal token "<UDIM>" exactly
+// once (already resolved to an absolute/baseDir-relative path by the
+// caller); every file in patternPath's directory matching
+// "<prefix><digits><suffix>" is treated as one tile, keyed by the standard
+// UDIM numbering (1001 + u + 10*v). Returns nullptr (logging via stderr,
+// same "missing/broken texture doesn't fail the whole scene load"
+// convention as LoadTextureFromFile) if no tiles are found or tiles
+// disagree on resolution - a partial/malformed UDIM set shouldn't silently
+// misrender.
+std::unique_ptr<Texture> LoadUdimAtlas(const std::string &patternPath, TextureColorSpace space)
+{
+    const std::string kToken = "<UDIM>";
+    size_t tokenPos = patternPath.find(kToken);
+    if (tokenPos == std::string::npos)
+        return nullptr;
+
+    std::string prefix = patternPath.substr(0, tokenPos);
+    std::string suffix = patternPath.substr(tokenPos + kToken.size());
+
+    std::filesystem::path dir = std::filesystem::path(prefix).parent_path();
+    std::string filePrefix = std::filesystem::path(prefix).filename().string();
+    if (dir.empty())
+        dir = ".";
+
+    struct Tile
+    {
+        int u, v;
+        std::unique_ptr<Texture> tex;
+    };
+    std::vector<Tile> tiles;
+
+    std::error_code ec;
+    for (const auto &entry : std::filesystem::directory_iterator(dir, ec))
+    {
+        if (ec || !entry.is_regular_file())
+            continue;
+
+        std::string name = entry.path().filename().string();
+        if (name.size() <= filePrefix.size() + suffix.size())
+            continue;
+        if (name.compare(0, filePrefix.size(), filePrefix) != 0)
+            continue;
+        if (name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0)
+            continue;
+
+        std::string digits = name.substr(filePrefix.size(), name.size() - filePrefix.size() - suffix.size());
+        if (digits.empty() || !std::all_of(digits.begin(), digits.end(), [](unsigned char c) { return std::isdigit(c); }))
+            continue;
+
+        int udim = std::stoi(digits);
+        int u = (udim - 1001) % 10;
+        int v = (udim - 1001) / 10;
+        if (u < 0 || v < 0)
+        {
+            std::cerr << "LoadUdimAtlas: skipping tile with out-of-range UDIM number " << udim
+                       << " (" << name << ")" << std::endl;
+            continue;
+        }
+
+        // generateMips=false - mips are generated once for the whole
+        // composited atlas below (see the plan's note that per-tile mip
+        // generation would need to happen twice - once per tile, once for
+        // the atlas - to no benefit, since only the atlas's own mip chain
+        // is ever sampled).
+        auto tex = LoadTextureFromFile(entry.path().string(), space, /*generateMips=*/false);
+        if (!tex)
+            continue;
+
+        tiles.push_back(Tile{u, v, std::move(tex)});
+    }
+
+    if (tiles.empty())
+    {
+        std::cerr << "LoadUdimAtlas: no tiles found matching pattern '" << patternPath << "'" << std::endl;
+        return nullptr;
+    }
+
+    int tileW = tiles[0].tex->width;
+    int tileH = tiles[0].tex->height;
+    int gridW = 0, gridH = 0;
+    for (const auto &t : tiles)
+    {
+        gridW = std::max(gridW, t.u + 1);
+        gridH = std::max(gridH, t.v + 1);
+        if (t.tex->width != tileW || t.tex->height != tileH)
+        {
+            std::cerr << "LoadUdimAtlas: tile resolution mismatch (expected " << tileW << "x" << tileH
+                       << ", got " << t.tex->width << "x" << t.tex->height << ") - rejecting UDIM set '"
+                       << patternPath << "'" << std::endl;
+            return nullptr;
+        }
+    }
+
+    auto atlas = std::make_unique<Texture>();
+    atlas->width = gridW * tileW;
+    atlas->height = gridH * tileH;
+    atlas->depth = 1;
+    atlas->udimGridWidth = gridW;
+    atlas->udimGridHeight = gridH;
+    size_t atlasTexelCount = (size_t)atlas->width * (size_t)atlas->height * 4;
+    atlas->data = new float[atlasTexelCount];
+    // Unpopulated cells (a sparse UDIM set, e.g. tiles 1001 and 1050 with
+    // nothing authored in between) stay black rather than garbage.
+    std::fill(atlas->data, atlas->data + atlasTexelCount, 0.0f);
+
+    for (const auto &t : tiles)
+    {
+        int originX = t.u * tileW;
+        int originY = t.v * tileH;
+        for (int y = 0; y < tileH; ++y)
+        {
+            const float *srcRow = t.tex->data + (size_t)y * tileW * 4;
+            float *dstRow = atlas->data + ((size_t)(originY + y) * atlas->width + originX) * 4;
+            std::copy(srcRow, srcRow + (size_t)tileW * 4, dstRow);
+        }
+    }
+
+    // Known artifact, accepted per the plan: box-filtering across the whole
+    // atlas doesn't know about tile boundaries, so coarse mip levels
+    // visibly bleed neighboring tiles' edge texels together. A per-tile-
+    // padded atlas layout would fix this but is out of scope here.
+    atlas->GenerateMips();
+    return atlas;
 }
 
 // Material definition class
@@ -226,6 +357,94 @@ private:
     float focalPoint = 1.0f;
 };
 
+// Punctual (point/directional) light definition class - mirrors
+// CameraDefinition's shape (plain setters + a to*() converter). Unlike
+// camera (at most one per scene), a scene can have any number of lights -
+// see SceneParser::lights below.
+class LightDefinition
+{
+public:
+    LightDefinition() {}
+
+    void setType(const std::string &t) { type = t; }
+    void setPosition(float x, float y, float z) { position = Vec3(x, y, z); }
+    void setDirection(float x, float y, float z) { direction = Vec3(x, y, z); }
+    void setColor(float r, float g, float b) { color = Vec3(r, g, b); }
+    void setIntensity(float value) { intensity = value; }
+    void setRadius(float value) { radius = value; }
+    void setAngle(float value) { angle = value; }
+
+    PunctualLight toLight() const
+    {
+        PunctualLight light;
+        light.type = (type == "directional") ? PunctualLightType::eDirectional : PunctualLightType::ePoint;
+        light.position = position;
+        light.direction = direction;
+        light.color = color;
+        light.intensity = intensity;
+        light.radius = radius;
+        light.angle = angle;
+        return light;
+    }
+
+private:
+    std::string type = "point";
+    Vec3 position = Vec3(0.0f);
+    Vec3 direction = Vec3(0.0f, -1.0f, 0.0f);
+    Vec3 color = Vec3(1.0f);
+    float intensity = 1.0f;
+    float radius = 0.0f;
+    float angle = 0.0f;
+};
+
+// Sky definition class - mirrors CameraDefinition's shape (at most one sky
+// per scene, plain setters, applied directly against Scene rather than via
+// a pure to*() converter since baking a Preetham sky needs to allocate a
+// Probe, not just fill a POD struct). "gradient" (the default, matching
+// Scene::Sky's own pre-existing defaults) sets the simple two-color
+// horizon/zenith gradient; "preetham" bakes the analytic model into an HDR
+// probe once at scene-load time - see Skylight.h's BakePreethamSky.
+class SkyDefinition
+{
+public:
+    SkyDefinition() {}
+
+    void setType(const std::string &t) { type = t; }
+    void setSunDirection(float x, float y, float z) { sunDirection = Vec3(x, y, z); }
+    void setTurbidity(float value) { turbidity = value; }
+    void setResolution(int w, int h) { resWidth = w; resHeight = h; }
+    void setHorizon(float r, float g, float b) { horizon = Vec3(r, g, b); }
+    void setZenith(float r, float g, float b) { zenith = Vec3(r, g, b); }
+
+    void applyTo(Scene &scene) const
+    {
+        if (type == "preetham")
+        {
+            std::cout << "Debug: Baking Preetham sky (turbidity=" << turbidity << ", resolution="
+                       << resWidth << "x" << resHeight << ")" << std::endl;
+            scene.sky.probe = BakePreethamSky(sunDirection, turbidity, resWidth, resHeight);
+        }
+        else
+        {
+            std::cout << "Debug: Setting gradient sky" << std::endl;
+            scene.sky.horizon = horizon;
+            scene.sky.zenith = zenith;
+        }
+    }
+
+private:
+    std::string type = "gradient";
+    Vec3 sunDirection = Vec3(0.3f, 0.8f, 0.2f);
+    float turbidity = 3.0f;
+    int resWidth = 256;
+    int resHeight = 128;
+    // Defaults match Scene::Sky's own pre-existing (Sky()-constructed)
+    // gradient - a `sky { type gradient }` block with no horizon/zenith
+    // properties set is a no-op relative to having no sky block at all.
+    Vec3 horizon = Vec3(0.0f);
+    Vec3 zenith = Vec3(0.0f);
+};
+
 // Primitive definition class
 class PrimitiveDefinition
 {
@@ -275,6 +494,9 @@ public:
         plane[3] = d;
     }
 
+    void setWidth(float w) { width = w; }
+    void setHeight(float h) { height = h; }
+
     Primitive toPrimitive(const std::map<std::string, MaterialDefinition> &materials, Scene &scene, const std::string &baseDir) const
     {
         std::cout << "Debug: Creating primitive of type: " << type << std::endl;
@@ -303,6 +525,17 @@ public:
             prim.plane.plane[2] = plane[2];
             prim.plane.plane[3] = plane[3];
         }
+        else if (type == "rect") {
+            std::cout << "Debug: Setting rect with width/height: " << width << ", " << height << std::endl;
+            prim.type = Type::eRect;
+            prim.rect.width = width;
+            prim.rect.height = height;
+        }
+        else if (type == "disk") {
+            std::cout << "Debug: Setting disk with radius: " << radius << std::endl;
+            prim.type = Type::eDisk;
+            prim.disk.radius = radius;
+        }
 
         // Set material
         std::cout << "Debug: Setting material: " << materialName << std::endl;
@@ -321,6 +554,19 @@ public:
                 if (relPath.empty())
                     return -1;
                 std::string resolvedPath = baseDir.empty() ? relPath : (std::filesystem::path(baseDir) / relPath).string();
+
+                // A literal "<UDIM>" token dispatches to the atlas loader
+                // instead of a plain single-file load - every other
+                // (non-UDIM) material map path is completely unaffected by
+                // this check.
+                if (resolvedPath.find("<UDIM>") != std::string::npos)
+                {
+                    auto atlas = LoadUdimAtlas(resolvedPath, space);
+                    if (!atlas)
+                        return -1;
+                    return scene.FindOrAddTexture(resolvedPath, std::move(atlas));
+                }
+
                 auto tex = LoadTextureFromFile(resolvedPath, space);
                 if (!tex)
                     return -1;
@@ -365,6 +611,8 @@ private:
     float scale = 1.0f;
     float radius = 1.0f;
     float plane[4] = {0.0f, 1.0f, 0.0f, 0.0f}; // Default: y-up plane at origin
+    float width = 1.0f;  // eRect only
+    float height = 1.0f; // eRect only
 };
 
 // Scene parser class
@@ -393,6 +641,8 @@ public:
         std::string currentMaterial;
         PrimitiveDefinition currentPrimitive;
         CameraDefinition currentCamera;
+        LightDefinition currentLight;
+        SkyDefinition currentSky;
         bool inBlock = false;
         bool waitingForBlockStart = false;
 
@@ -442,6 +692,20 @@ public:
                     hasCamera = true;
                     currentCamera = CameraDefinition();
                 }
+                else if (currentSection == "light") {
+                    std::cout << "Debug: Adding light to list" << std::endl;
+                    lights.push_back(currentLight);
+                    currentLight = LightDefinition();
+                }
+                else if (currentSection == "sky") {
+                    // A scene has at most one sky - a second `sky { }` block
+                    // silently overwrites the first, same "last one wins"
+                    // behavior as camera.
+                    std::cout << "Debug: Setting scene sky" << std::endl;
+                    sky = currentSky;
+                    hasSky = true;
+                    currentSky = SkyDefinition();
+                }
 
                 currentSection = "";
             } 
@@ -473,6 +737,20 @@ public:
                         currentCamera = CameraDefinition();
                         waitingForBlockStart = true;
                     }
+                    else if (parts[0] == "light") {
+                        currentSection = "light";
+                        std::cout << "Debug: Starting light section" << std::endl;
+
+                        currentLight = LightDefinition();
+                        waitingForBlockStart = true;
+                    }
+                    else if (parts[0] == "sky") {
+                        currentSection = "sky";
+                        std::cout << "Debug: Starting sky section" << std::endl;
+
+                        currentSky = SkyDefinition();
+                        waitingForBlockStart = true;
+                    }
                 }
             }
             else if (inBlock) {
@@ -488,9 +766,15 @@ public:
                 else if (currentSection == "camera") {
                     parseCameraProperty(currentCamera, parts);
                 }
+                else if (currentSection == "light") {
+                    parseLightProperty(currentLight, parts);
+                }
+                else if (currentSection == "sky") {
+                    parseSkyProperty(currentSky, parts);
+                }
             }
         }
-
+        
         // If we're still in a block at the end of the file, handle it
         if (inBlock && currentSection == "primitive") {
             std::cout << "Debug: Adding final primitive to list" << std::endl;
@@ -501,6 +785,16 @@ public:
             camera = currentCamera;
             hasCamera = true;
         }
+        else if (inBlock && currentSection == "light") {
+            std::cout << "Debug: Adding final light to list" << std::endl;
+            lights.push_back(currentLight);
+        }
+        else if (inBlock && currentSection == "sky") {
+            std::cout << "Debug: Setting final scene sky" << std::endl;
+            sky = currentSky;
+            hasSky = true;
+        }
+
 
         std::cout << "Debug: Parsing complete. Found " << materials.size() << " materials and " << primitives.size() << " primitives" << std::endl;
         
@@ -531,6 +825,22 @@ public:
             {
                 std::cerr << "Unknown exception while adding primitive" << std::endl;
             }
+        }
+
+        // Add punctual (point/directional) lights.
+        std::cout << "Debug: Adding " << lights.size() << " lights to scene" << std::endl;
+        for (const auto &lightDef : lights)
+        {
+            scene.lights.push_back(lightDef.toLight());
+        }
+
+        // Apply the parsed sky, if a `sky { }` block was present. If not,
+        // scene.sky stays at Scene::Clear()'s Sky() defaults (the same
+        // simple all-zero gradient as before this feature existed).
+        if (hasSky)
+        {
+            std::cout << "Debug: Applying parsed sky to scene" << std::endl;
+            sky.applyTo(scene);
         }
 
         // Add the parsed camera, if a `camera { }` block was present. If not,
@@ -680,6 +990,16 @@ private:
                 std::cout << "Debug: Setting plane: (" << a << ", " << b << ", " << c << ", " << d << ")" << std::endl;
                 primitive.setPlane(a, b, c, d);
             }
+            else if (property == "width" && parts.size() >= 2) {
+                float w = std::stof(parts[1]);
+                std::cout << "Debug: Setting width: " << w << std::endl;
+                primitive.setWidth(w);
+            }
+            else if (property == "height" && parts.size() >= 2) {
+                float h = std::stof(parts[1]);
+                std::cout << "Debug: Setting height: " << h << std::endl;
+                primitive.setHeight(h);
+            }
         }
         catch (const std::exception& e) {
             std::cerr << "Exception while parsing primitive property: " << e.what() << std::endl;
@@ -732,10 +1052,78 @@ private:
         }
     }
 
+    void parseLightProperty(LightDefinition &light, const std::vector<std::string> &parts) {
+        if (parts.empty()) return;
+
+        std::string property = parts[0];
+        std::cout << "Debug: Parsing light property: " << property << std::endl;
+
+        try {
+            if (property == "type" && parts.size() >= 2) {
+                light.setType(parts[1]);
+            }
+            else if (property == "position" && parts.size() >= 4) {
+                light.setPosition(std::stof(parts[1]), std::stof(parts[2]), std::stof(parts[3]));
+            }
+            else if (property == "direction" && parts.size() >= 4) {
+                light.setDirection(std::stof(parts[1]), std::stof(parts[2]), std::stof(parts[3]));
+            }
+            else if (property == "color" && parts.size() >= 4) {
+                light.setColor(std::stof(parts[1]), std::stof(parts[2]), std::stof(parts[3]));
+            }
+            else if (property == "intensity" && parts.size() >= 2) {
+                light.setIntensity(std::stof(parts[1]));
+            }
+            else if (property == "radius" && parts.size() >= 2) {
+                light.setRadius(std::stof(parts[1]));
+            }
+            else if (property == "angle" && parts.size() >= 2) {
+                light.setAngle(std::stof(parts[1]));
+            }
+        }
+        catch (const std::exception& e) {
+            std::cerr << "Exception while parsing light property: " << e.what() << std::endl;
+        }
+    }
+
+    void parseSkyProperty(SkyDefinition &s, const std::vector<std::string> &parts) {
+        if (parts.empty()) return;
+
+        std::string property = parts[0];
+        std::cout << "Debug: Parsing sky property: " << property << std::endl;
+
+        try {
+            if (property == "type" && parts.size() >= 2) {
+                s.setType(parts[1]);
+            }
+            else if (property == "sunDirection" && parts.size() >= 4) {
+                s.setSunDirection(std::stof(parts[1]), std::stof(parts[2]), std::stof(parts[3]));
+            }
+            else if (property == "turbidity" && parts.size() >= 2) {
+                s.setTurbidity(std::stof(parts[1]));
+            }
+            else if (property == "resolution" && parts.size() >= 3) {
+                s.setResolution(std::stoi(parts[1]), std::stoi(parts[2]));
+            }
+            else if (property == "horizon" && parts.size() >= 4) {
+                s.setHorizon(std::stof(parts[1]), std::stof(parts[2]), std::stof(parts[3]));
+            }
+            else if (property == "zenith" && parts.size() >= 4) {
+                s.setZenith(std::stof(parts[1]), std::stof(parts[2]), std::stof(parts[3]));
+            }
+        }
+        catch (const std::exception& e) {
+            std::cerr << "Exception while parsing sky property: " << e.what() << std::endl;
+        }
+    }
+
     std::map<std::string, MaterialDefinition> materials;
     std::vector<PrimitiveDefinition> primitives;
+    std::vector<LightDefinition> lights;
     CameraDefinition camera;
     bool hasCamera = false;
+    SkyDefinition sky;
+    bool hasSky = false;
     // The .tin file's own directory, set by parse() - albedoMap/roughnessMap/
     // metallicMap paths are resolved relative to this, not the process's
     // current working directory.
@@ -857,6 +1245,7 @@ int main(int argc, char *argv[])
     options.filter = Filter(FilterType::eFilterGaussian, 1.0f, 2.0f);
     options.exposure = 1.0f;
     options.clamp = 10.0f;
+    options.enableDOF = false;
 
     // Compose the manual exposure multiplier above with any physically-
     // derived one from the camera's fStop/shutterSpeed/iso (see
@@ -864,7 +1253,6 @@ int main(int argc, char *argv[])
     // scene's camera block set all three, so this is a no-op for every
     // scene that doesn't opt into physical exposure.
     options.exposure *= scene.camera->ComputeExposureMultiplier();
-    options.enableDOF = false;
 
     // Allocate memory for output image
     std::cout << "Debug: Allocating memory for output image" << std::endl;
