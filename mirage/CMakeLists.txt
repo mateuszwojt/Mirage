@@ -46,7 +46,15 @@ add_library(Mirage STATIC
 
 set_target_properties(Mirage PROPERTIES
     VERSION ${PROJECT_VERSION}
-    MSVC_RUNTIME_LIBRARY "MultiThreadedDLL$<$<CONFIG:Release>:Release>"
+    # CMake's MSVC_RUNTIME_LIBRARY only recognizes four literal values
+    # (MultiThreaded[Debug][DLL]) - the conditional suffix must be "Debug",
+    # never "Release". The previous "MultiThreadedDLL$<$<CONFIG:Release>:Release>"
+    # evaluated to the non-existent "MultiThreadedDLLRelease" on any
+    # single-config MSVC build with CMAKE_BUILD_TYPE=Release (e.g. CI's
+    # windows-x86_64 job, the first real MSVC build this repo has run),
+    # failing CMake's generate step. This never surfaced on macOS/Linux since
+    # non-MSVC toolchains silently ignore MSVC_RUNTIME_LIBRARY.
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
     INSTALL_RPATH "$ORIGIN"
 )
 
