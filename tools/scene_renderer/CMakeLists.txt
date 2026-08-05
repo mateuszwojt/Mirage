@@ -9,9 +9,19 @@ target_include_directories(scene_renderer PRIVATE
 )
 
 # Link with Mirage library
+#
+# spdlog::spdlog_header_only: scene_renderer includes mirage/utils/Log.h directly (for
+# MIRAGE_LOG_* / Mirage::Log::Init()) - Mirage links spdlog PRIVATE, so this
+# executable needs its own link line for spdlog's headers/lib to be visible
+# here. The spdlog::spdlog_header_only target itself is already available globally by the
+# time this file is processed (mirage/CMakeLists.txt's FetchContent_MakeAvailable
+# runs via add_subdirectory(mirage) before add_subdirectory(tools)).
 target_link_libraries(scene_renderer PRIVATE
     Mirage
+    spdlog::spdlog_header_only
 )
+# See mirage/utils/Log.h's comment on MIRAGE_LOG_TRACE/DEBUG.
+target_compile_definitions(scene_renderer PRIVATE SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_TRACE)
 
 # scene_renderer dynamically depends on the Slang runtime dylibs/.so's that
 # kernels/CMakeLists.txt installs into lib/ alongside this binary's bin/ - set

@@ -20,6 +20,8 @@ jobs:
             os: ubuntu-24.04
           - platform: linux-aarch64
             os: ubuntu-24.04-arm
+          - platform: windows-x86_64
+            os: windows-2022
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +40,30 @@ jobs:
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
         run: brew install ninja vulkan-headers vulkan-loader molten-vk
+
+      # Windows has no apt/brew equivalent for the Vulkan loader/headers, and
+      # no lavapipe-equivalent software ICD readily available - so
+      # kernel_validate stays fully skipped below rather than run
+      # informationally, unlike on Linux/macOS.
+      - name: Install Windows build dependencies (Vulkan SDK)
+        if: runner.os == 'Windows'
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: latest
+          vulkan-components: Vulkan-Headers, Vulkan-Loader
+          vulkan-use-cache: true
+
+      # Ninja needs cl.exe/link.exe on PATH, which isn't the default shell
+      # environment on windows-2022 runners - this Developer Command Prompt
+      # setup keeps the Configure/Build steps below identical across all
+      # three platforms instead of branching on generator per-OS.
+      - name: Set up MSVC dev environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Ninja (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ninja -y
 
       # Speeds up rebuilds: the Slang distribution download, slang-rhi
       # checkout, and Dawn/Vulkan-Headers fetches are all pinned by version in
@@ -60,13 +86,22 @@ jobs:
       # have no real GPU, so the software Vulkan ICD (lavapipe on Linux) can
       # diverge numerically from the reference in ways real hardware doesn't -
       # this catches build/link/crash regressions, not shading correctness.
+      # Skipped entirely on Windows: no software Vulkan ICD is wired up there
+      # yet (see the Windows dependency step above), so there's no device for
+      # it to run against at all on a GPU-less runner.
       - name: Run kernel_validate (informational)
+        if: runner.os != 'Windows'
         run: ./build/tools/kernel_validate/kernel_validate || true
 
       - name: Install
+        shell: bash
         run: |
           cmake --install build --prefix install-stage
-          cp build/tools/kernel_validate/kernel_validate install-stage/bin/
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp build/tools/kernel_validate/kernel_validate.exe install-stage/bin/
+          else
+            cp build/tools/kernel_validate/kernel_validate install-stage/bin/
+          fi
 
       - name: Package
         shell: bash
@@ -77,8 +112,13 @@ jobs:
           else
             version="$(git rev-parse --short HEAD)"
           fi
-          archive="mirage-${version}-${{ matrix.platform }}.tar.gz"
-          tar -C install-stage -czf "$archive" .
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            archive="mirage-${version}-${{ matrix.platform }}.zip"
+            (cd install-stage && 7z a -tzip "../$archive" .)
+          else
+            archive="mirage-${version}-${{ matrix.platform }}.tar.gz"
+            tar -C install-stage -czf "$archive" .
+          fi
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4

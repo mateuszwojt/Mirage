@@ -35,8 +35,15 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     else()
         message(FATAL_ERROR "Mirage's Slang/Vulkan kernel path does not yet have a pinned Slang distribution for Linux ${CMAKE_SYSTEM_PROCESSOR}")
     endif()
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+        set(MIRAGE_SLANG_DIST_URL "https://github.com/shader-slang/slang/releases/download/v${MIRAGE_SLANG_VERSION}/slang-${MIRAGE_SLANG_VERSION}-windows-x86_64.zip")
+        set(MIRAGE_SLANG_DIST_HASH "SHA256=36029c50ef0c82f2616ffb02e0ed27d642cb44a2a297d531cc2ad333b85b85b6")
+    else()
+        message(FATAL_ERROR "Mirage's Slang/Vulkan kernel path does not yet have a pinned Slang distribution for Windows ${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
 else()
-    message(FATAL_ERROR "Mirage's Slang/Vulkan kernel path is currently only wired up for macOS (MoltenVK) and Linux (native Vulkan); ${CMAKE_SYSTEM_NAME} is not yet supported here")
+    message(FATAL_ERROR "Mirage's Slang/Vulkan kernel path is currently only wired up for macOS (MoltenVK), Linux (native Vulkan), and Windows (native Vulkan); ${CMAKE_SYSTEM_NAME} is not yet supported here")
 endif()
 
 FetchContent_Declare(
@@ -47,7 +54,11 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(mirage_slang_dist)
 
-set(MIRAGE_SLANGC "${mirage_slang_dist_SOURCE_DIR}/bin/slangc" CACHE FILEPATH "Path to the slangc compiler used to build Mirage's kernels" FORCE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    set(MIRAGE_SLANGC "${mirage_slang_dist_SOURCE_DIR}/bin/slangc.exe" CACHE FILEPATH "Path to the slangc compiler used to build Mirage's kernels" FORCE)
+else()
+    set(MIRAGE_SLANGC "${mirage_slang_dist_SOURCE_DIR}/bin/slangc" CACHE FILEPATH "Path to the slangc compiler used to build Mirage's kernels" FORCE)
+endif()
 
 # --- slang-rhi ---------------------------------------------------------------
 
@@ -65,6 +76,15 @@ set(SLANG_RHI_INSTALL OFF CACHE BOOL "" FORCE)
 # and CI/dev machines building the Vulkan path have no CUDA toolkit installed.
 set(SLANG_RHI_ENABLE_CUDA OFF CACHE BOOL "" FORCE)
 set(SLANG_RHI_ENABLE_OPTIX OFF CACHE BOOL "" FORCE)
+# D3D11/D3D12 default ON on Windows too, for the same reason - VulkanRenderer
+# only ever requests the Vulkan backend, so keep Windows scoped to Vulkan-only
+# the same way macOS (MoltenVK) and Linux already are, rather than silently
+# pulling in the Agility SDK / NVAPI / DirectXShaderCompiler downloads.
+set(SLANG_RHI_ENABLE_D3D11 OFF CACHE BOOL "" FORCE)
+set(SLANG_RHI_ENABLE_D3D12 OFF CACHE BOOL "" FORCE)
+set(SLANG_RHI_ENABLE_AGILITY_SDK OFF CACHE BOOL "" FORCE)
+set(SLANG_RHI_ENABLE_NVAPI OFF CACHE BOOL "" FORCE)
+set(SLANG_RHI_FETCH_DXC OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(
     slang_rhi
@@ -265,7 +285,20 @@ install(FILES
 
 # *.dylib on Darwin, *.so[.<version>] on Linux (slang's Linux dist ships
 # versioned sonames, e.g. libgfx.so.0.2026.14, alongside the unversioned name).
-file(GLOB MIRAGE_SLANG_RUNTIME_DYLIBS "${mirage_slang_dist_SOURCE_DIR}/lib/*.dylib" "${mirage_slang_dist_SOURCE_DIR}/lib/*.so*")
+# On Windows, Slang's runtime DLLs live under bin/ (not lib/) in the pinned
+# distribution - see the archive layout confirmed when the Windows pin above
+# was added. Installing them into CMAKE_INSTALL_LIBDIR here matches the
+# Darwin/Linux layout, but Windows DLL search-path resolution (same-directory-
+# as-the-.exe vs. PATH vs. an rpath-equivalent) has not been validated against
+# a real Windows build - scene_renderer's INSTALL_RPATH logic (see
+# tools/scene_renderer/CMakeLists.txt) is currently Darwin/Linux-only and may
+# need a Windows-specific fixup (e.g. installing DLLs alongside the .exe in
+# bin/ instead) once a real Windows build is attempted.
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    file(GLOB MIRAGE_SLANG_RUNTIME_DYLIBS "${mirage_slang_dist_SOURCE_DIR}/bin/*.dll")
+else()
+    file(GLOB MIRAGE_SLANG_RUNTIME_DYLIBS "${mirage_slang_dist_SOURCE_DIR}/lib/*.dylib" "${mirage_slang_dist_SOURCE_DIR}/lib/*.so*")
+endif()
 install(FILES ${MIRAGE_SLANG_RUNTIME_DYLIBS} DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 
 # Best-effort only: slang-rhi's WGPU/Dawn backend is never used by Mirage (the
