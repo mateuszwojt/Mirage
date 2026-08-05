@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 #include "mirage/utils/MathUtils.h"
 #include "mirage/core/Scene.h"
@@ -61,26 +63,50 @@ namespace Mirage
 
     // Bitmask values for Options::aovMask - which auxiliary first-hit buffers
     // a Render() call should populate, in addition to the always-computed
-    // beauty/color output. All three are single-valued per-pixel snapshots of
-    // the primary ray hit (not progressively accumulated like color), see
-    // AovBuffers.
+    // beauty/color output. By default all four are single-valued per-pixel
+    // snapshots of the primary ray hit (not progressively accumulated like
+    // color) - see AovBuffers and Options::accumulateAovs to opt into
+    // running-mean accumulation instead (CPU backend only today).
     enum AovType : uint32_t
     {
         kAovDepth  = 1u << 0, // .x = primary-ray hit distance; AovBuffers::depth
         kAovNormal = 1u << 1, // .xyz = world-space shading normal; AovBuffers::normal
         kAovPrimId = 1u << 2, // .x = (float)Primitive::hydraId, -1.0f on miss; AovBuffers::primId
+        kAovAlbedo = 1u << 3, // .xyz = resolved (texture-sampled) base color at the primary hit, .w unused; AovBuffers::albedo
+    };
+
+    // Tier B / "arbitrary" AOVs (docs/PRODUCTION_READINESS.md's Tier 3 "no
+    // arbitrary/user-defined AOVs" finding): requested by name rather than a
+    // fixed AovType bit, CPU backend only today - the GPU/Vulkan backend
+    // leaves every NamedAov::buffer untouched and logs a one-time warning
+    // per Render() call if any are requested, matching AovBuffers' existing
+    // "not populated" convention rather than crashing. See
+    // mirage/core/Renderer.cpp's PathTrace() for the fixed set of names it
+    // currently recognizes (e.g. "P" world-space hit position, "uv" surface
+    // UV) - an unrecognized name is silently left unpopulated too, the same
+    // "caller over-requested, not an error" convention as a set AovType bit
+    // with a null AovBuffers pointer.
+    struct NamedAov
+    {
+        std::string name;
+        Color *buffer = nullptr;
     };
 
     // Caller-owned output buffers for the AOVs requested via
-    // Options::aovMask. Each pointer, if non-null, must point to a
+    // Options::aovMask (depth/normal/primId/albedo) plus `named` (Tier B,
+    // see NamedAov). Each AovType pointer, if non-null, must point to a
     // width*height Color array (matching the primary `output` array's
-    // dimensions). A set aovMask bit with a null pointer here is treated as
-    // "not requested" by both backends, not a crash.
+    // dimensions); same requirement for every NamedAov::buffer in `named`. A
+    // set aovMask bit with a null pointer here is treated as "not requested"
+    // by both backends, not a crash.
     struct AovBuffers
     {
         Color *depth = nullptr;
         Color *normal = nullptr;
         Color *primId = nullptr;
+        Color *albedo = nullptr;
+
+        std::vector<NamedAov> named;
     };
 
     struct Options
@@ -107,6 +133,19 @@ namespace Mirage
         // call, in addition to color. 0 (the default) means color only,
         // preserving the behavior of every pre-existing call site.
         uint32_t aovMask = 0;
+
+        // false (default): AovType buffers are first-hit-only snapshots,
+        // preserving the original behavior every pre-existing call site
+        // (HydraCompatibility.cpp/HdMirageRenderer) relies on - captured
+        // once, on the primary-ray hit of the *first* sample only, never
+        // overwritten by later samples' antialiasing jitter. true: instead
+        // accumulate a running per-pixel mean across all `maxSamples`
+        // samples, the same way the beauty buffer progressively converges -
+        // CPU backend only today; the GPU/Vulkan backend ignores this flag
+        // and keeps first-sample-only behavior regardless (its AOV buffers
+        // are already overwritten-not-accumulated by construction - see
+        // VulkanRenderer.cpp).
+        bool accumulateAovs = false;
     };
 
     struct Renderer

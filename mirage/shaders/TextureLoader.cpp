@@ -1,4 +1,5 @@
 #include "mirage/shaders/TextureLoader.h"
+#include "mirage/math/Color.h"
 #include "mirage/utils/Log.h"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -8,16 +9,6 @@
 
 namespace Mirage
 {
-    namespace
-    {
-        float SrgbToLinear(float c)
-        {
-            if (c <= 0.04045f)
-                return c / 12.92f;
-            return powf((c + 0.055f) / 1.055f, 2.4f);
-        }
-    }
-
     std::unique_ptr<Texture> LoadTextureFromFile(const std::string &path, TextureColorSpace colorSpace, bool generateMips)
     {
         int width = 0, height = 0, channelsInFile = 0;

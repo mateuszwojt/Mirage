@@ -49,23 +49,86 @@ namespace Mirage
         return geo;
     }
 
+    // filmic: the Hejl/Burgess-Dawson filmic curve (these exact 6.2/0.5/1.7/
+    // 0.06 constants, with the 0.004 toe offset) - a well-known property of
+    // *this specific curve* is that gamma correction is already baked into
+    // its polynomial fit, so its output is display-ready/sRGB-encoded
+    // directly with no separate encode step
+    // (https://filmicworlds.com/blog/filmic-tonemapping-operators/, the
+    // "you don't need to convert to sRGB after" derivation). The previous
+    // code called SrgbToLinear - a *decode* - on this already-encoded
+    // output, double-transforming (darkening/distorting) every LDR render;
+    // removed rather than replaced, since no gamma call belongs here at all.
+    //
+    // `limit` is now applied as a pre-curve highlight-compression control
+    // (the curve's "linear white point": scaling input down before the
+    // curve pushes highlight roll-off further out) - previously a dead
+    // parameter, unused in the function body.
     CUDA_CALLABLE inline Color ToneMap(const Color &c, float limit)
     {
-        // filmic
-        Vec3 texColor = Vec3(c);
+        Vec3 texColor = Vec3(c) / Max(limit, 1e-4f);
         Vec3 x = Max(Vec3(0.0f), texColor - Vec3(0.004f));
         Vec3 retColor = (x * (Vec3(6.2f) * x + Vec3(.5f))) / (x * (Vec3(6.2f) * x + Vec3(1.7f)) + Vec3(0.06));
 
-        return SrgbToLinear(Color(retColor, 0.0f));
+        return Color(retColor, c.w);
     }
 
+    // Krzysztof Narkowicz's fitted ACES RRT+ODT approximation
+    // (https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/).
+    // Unlike ToneMap above, this curve's output is still display-*linear* -
+    // Narkowicz's own writeup calls for a standard gamma/sRGB encode after
+    // it, which is what LinearToSrgb (an *encode*) provides here; the
+    // previous code called SrgbToLinear (a *decode*), the wrong direction.
+    // Same `limit` pre-curve highlight-compression treatment as ToneMap.
     CUDA_CALLABLE inline Color ToneMapACES(const Color &c, float limit)
     {
-        Vec3 texColor = Vec3(c);
+        Vec3 texColor = Vec3(c) / Max(limit, 1e-4f);
         Vec3 x = Max(Vec3(0.0f), texColor - Vec3(0.004f));
         Vec3 retColor = (x * (Vec3(2.51f) * x + Vec3(0.03f))) / (x * (Vec3(2.43f) * x + Vec3(0.59f)) + Vec3(0.14f));
 
-        return SrgbToLinear(Color(retColor, 0.0f));
+        return LinearToSrgb(Color(retColor, c.w));
+    }
+
+    // Minimal color-management extension point (docs/PRODUCTION_READINESS.md's
+    // Tier 3 "no color management" finding) - deliberately not a full OCIO
+    // integration (config parsing, ACES IDT/RRT/ODT reference chain, look/LUT
+    // management, display calibration are all explicitly out of scope here;
+    // OCIO's own dependency chain, e.g. yaml-cpp, is disproportionate for a
+    // codebase that avoids even linking real OpenEXR in favor of vendored
+    // tinyexr). This enum + ApplyViewTransform is the single place a real
+    // OCIO backend could later plug in without touching every call site.
+    enum class ViewTransform
+    {
+        eNone,        // raw linear values, exposure-scaled only - no display
+                      // encode at all; only meaningful for float/EXR output,
+                      // never for an 8-bit target (would look far too dark).
+        eFilmic,      // ToneMap: Hejl/Burgess-Dawson filmic curve.
+        eAcesLike,    // ToneMapACES: Narkowicz's fitted ACES approximation.
+        eSrgbDisplay, // plain LinearToSrgb encode, no filmic highlight roll-off.
+    };
+
+    // Maps a linear-light pixel to a display-referred one for a given
+    // ViewTransform, applying `exposure` as a multiplicative scale *before*
+    // the transform (standard convention - matches Options::exposure /
+    // Camera::ComputeExposureMultiplier's existing multiplicative
+    // semantics elsewhere in the codebase). ToneMap/ToneMapACES's own
+    // `limit` (highlight-compression) parameter is fixed at 1.0 here - no
+    // additional knob beyond `exposure` is exposed at this layer today.
+    CUDA_CALLABLE inline Color ApplyViewTransform(const Color &linear, ViewTransform vt, float exposure)
+    {
+        Color exposed = Color(Vec3(linear) * exposure, linear.w);
+        switch (vt)
+        {
+        case ViewTransform::eFilmic:
+            return ToneMap(exposed, 1.0f);
+        case ViewTransform::eAcesLike:
+            return ToneMapACES(exposed, 1.0f);
+        case ViewTransform::eSrgbDisplay:
+            return LinearToSrgb(exposed);
+        case ViewTransform::eNone:
+        default:
+            return exposed;
+        }
     }
 
     struct CameraSampler
