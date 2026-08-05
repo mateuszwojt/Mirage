@@ -30,12 +30,14 @@ namespace Mirage
 			clearcoat = 0.0f;
 			clearcoatGloss = 1.0f;
 			transmission = 0.0f;
+			opacity = 1.0f;
 			bump = 0.0f;
 			bumpTile = 10.0f;
 
 			albedoTextureIndex = -1;
 			roughnessTextureIndex = -1;
 			metallicTextureIndex = -1;
+			opacityTextureIndex = -1;
 		};
 
 		CUDA_CALLABLE inline float GetIndexOfRefraction() const
@@ -63,6 +65,14 @@ namespace Mirage
 		float clearcoatGloss;
 		float transmission;
 
+		// 1.0 = fully opaque (default). Below that, resolved stochastically
+		// per-hit (accept/reject against a uniform draw) - see
+		// TraceWithCutout() in Renderer.cpp / PathTrace.slang's opacity
+		// retry loop. This is "cutout" transparency (a surface is either
+		// fully there or fully not, per sample), not alpha blending -
+		// unrelated to `transmission`, which is a real dielectric BSDF lobe.
+		float opacity;
+
 		Texture albedoMap;
 
 		Texture bumpMap;
@@ -76,5 +86,6 @@ namespace Mirage
 		int albedoTextureIndex;
 		int roughnessTextureIndex;
 		int metallicTextureIndex;
+		int opacityTextureIndex; // -1 = none, use `opacity` scalar as-is; alpha channel of the bound texture
 	};
 }

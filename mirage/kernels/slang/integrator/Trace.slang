@@ -1,11 +1,14 @@
 // Port of Renderer.cpp's Trace(): top-level scene BVH traversal (QueryBVH),
 // testing each leaf primitive via PrimitiveIntersect and keeping the closest hit.
 
+import Constants;
 import MathExt;
 import BVH;
 import Intersection;
 import SceneBuffers;
 import Primitive;
+import Material;
+import Random;
 
 // outUV mirrors outNormal: populated only for eMesh hits on a UV-bearing
 // mesh, left at float2(0.0f) otherwise (see PrimitiveIntersect's outUV
@@ -80,4 +83,53 @@ bool Trace(float3 rayOrigin, float3 rayDir, float rayTime, uint numScenePrims,
     outPrimIndex = closestPrim;
     outUV = closestUV;
     return closestPrim >= 0;
+}
+
+// Mirrors Renderer.cpp's TraceWithCutout(): traces a ray, transparently
+// skipping past any surface that fails a stochastic opacity test
+// (GpuMaterial.opacity/opacityTextureIndex) - "cutout" transparency
+// (accept/reject against a uniform draw, not alpha blending). On a reject,
+// the ray continues from just past the rejected hit point, without
+// consuming caller-visible bounce/depth budget. Same signature as Trace()
+// plus `rand`, so every call site swaps in directly. Bounded by
+// kMaxCutoutRetries; if that budget runs out, the last-tested hit is
+// reported as-is (treated as opaque) rather than retried forever.
+static const int kMaxCutoutRetries = 4;
+
+bool TraceWithCutout(float3 rayOrigin, float3 rayDir, float rayTime, uint numScenePrims, inout Random rand,
+                      out float outT, out float3 outNormal, out int outPrimIndex, out float2 outUV)
+{
+    // outT must end up measured from the ORIGINAL ray origin the caller
+    // passed in, not from whatever retry-shifted origin the final accepted
+    // Trace() call used - SampleLights.slang compares outT against an
+    // independently-computed distance-to-light from that same original
+    // origin, so without this running total a retried ray would report a
+    // too-short distance and wrongly treat a fully-visible light as
+    // occluded by whatever it cutout-passed-through en route.
+    float accumulatedT = 0.0f;
+    outT = 0.0f;
+
+    [loop]
+    for (int i = 0; i < kMaxCutoutRetries; ++i)
+    {
+        float localT;
+        if (!Trace(rayOrigin, rayDir, rayTime, numScenePrims, localT, outNormal, outPrimIndex, outUV))
+            return false;
+
+        GpuMaterial hitMaterial = g_Materials[g_Primitives[outPrimIndex].materialIndex];
+        float opacity = hitMaterial.opacity;
+        if (hitMaterial.opacityTextureIndex >= 0)
+            opacity = Material_SampleOpacity(hitMaterial, outUV);
+
+        outT = accumulatedT + localT;
+
+        if (opacity >= 1.0f || rand.Randf() < opacity)
+            return true;
+
+        float3 p = rayOrigin + rayDir * localT;
+        accumulatedT = outT + kRayEpsilon;
+        rayOrigin = p + rayDir * kRayEpsilon;
+    }
+
+    return true; // retry budget exhausted - report the last hit as-is
 }

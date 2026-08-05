@@ -309,12 +309,14 @@ namespace
         g.clearcoat = m.clearcoat;
         g.clearcoatGloss = m.clearcoatGloss;
         g.transmission = m.transmission;
+        g.opacity = m.opacity;
         // Sentinel, not m.xxxTextureIndex - this helper feeds the isolated
         // BSDF unit test (BsdfTestMain.slang), which never samples textures;
         // -1 keeps it well-defined regardless of what `m` happens to carry.
         g.albedoTextureIndex = -1;
         g.roughnessTextureIndex = -1;
         g.metallicTextureIndex = -1;
+        g.opacityTextureIndex = -1;
         return g;
     }
 
@@ -1029,6 +1031,282 @@ namespace
         return pass;
     }
 
+    // M11 (Tier-1 "opacity/cutout transparency"): two sub-tests.
+    //
+    // Sub-test 1 fires many independent-seed rays straight at a single
+    // opacity=0.5 plane in front of a distinctly-colored sky - a plane
+    // (not a sphere) deliberately, since a ray through a sphere crosses it
+    // twice (TraceWithCutout would re-roll opacity at the far side too, per
+    // IntersectRaySphere's "ray origin ended up inside the sphere" branch
+    // in Intersection.h) which would turn the analytic expectation below
+    // into (1-opacity)^2 instead of the clean 1-opacity this test wants.
+    // Checks CPU/GPU agreement per-sample (same seed + algorithmically
+    // identical RNG on both backends, per Random.slang's own header
+    // comment, so this holds to the same near-bit-exact bar as every other
+    // PathTrace validation case in this file) AND that the measured
+    // hit-fraction/mean-radiance actually converges toward the configured
+    // opacity - proof cutout is firing at roughly the right rate, not just
+    // that both backends agree on being wrong the same way.
+    //
+    // Sub-test 2 exercises the *shadow*-ray cutout path specifically
+    // (SampleLights' NEE shadow rays, not primary/camera rays) - a floor
+    // lit by a light behind a cutout "screen", compared across
+    // screenOpacity = 0.0 (no occluder) / 1.0 (fully blocked) / 0.5
+    // (cutout), checking the fully-blocked case is exactly zero, the
+    // cutout case is strictly between the two baselines (bleed-through is
+    // happening, not fully blocked and not fully unoccluded), and CPU/GPU
+    // agree per-sample at each opacity.
+    namespace
+    {
+        const float kOpacityTestValue = 0.5f;
+        const int kOpacitySampleCount = 64;
+
+        // A ray from (0,0,6) along -Z crosses this plane exactly once at
+        // z=0 - see the single-vs-double-crossing note above.
+        void BuildOpacityCutoutTestScene(Scene &scene)
+        {
+            Primitive cutoutPrim;
+            cutoutPrim.type = ePlane;
+            cutoutPrim.plane.plane[0] = 0.0f;
+            cutoutPrim.plane.plane[1] = 0.0f;
+            cutoutPrim.plane.plane[2] = 1.0f;
+            cutoutPrim.plane.plane[3] = 0.0f; // z = 0
+            cutoutPrim.startTransform = Transform(Vec3(0.0f, 0.0f, 0.0f));
+            cutoutPrim.endTransform = cutoutPrim.startTransform;
+            {
+                auto mat = std::make_unique<Material>();
+                mat->color = Vec3(0.0f);
+                mat->emission = Vec3(3.0f, 0.2f, 0.2f); // strong, distinct red - "opaque hit" signal
+                mat->opacity = kOpacityTestValue;
+                cutoutPrim.materialIndex = scene.AddMaterial(std::move(mat));
+            }
+            scene.AddPrimitive(cutoutPrim);
+
+            // Strong, distinct blue, constant regardless of direction
+            // (horizon == zenith) - "saw through" signal.
+            scene.sky.horizon = Vec3(0.2f, 0.2f, 3.0f);
+            scene.sky.zenith = scene.sky.horizon;
+
+            scene.Build();
+        }
+
+        // Floor (y=-1) lit by a small light (0,3,0) straight up from the
+        // test ray's floor-hit point, through a "screen" plane at y=1 -
+        // the vertical shadow ray crosses the screen exactly once, same
+        // single-crossing reasoning as the plane above.
+        void BuildShadowCutoutTestScene(Scene &scene, float screenOpacity)
+        {
+            Primitive floorPrim;
+            floorPrim.type = ePlane;
+            floorPrim.plane.plane[0] = 0.0f;
+            floorPrim.plane.plane[1] = 1.0f;
+            floorPrim.plane.plane[2] = 0.0f;
+            floorPrim.plane.plane[3] = 1.0f; // y = -1
+            floorPrim.startTransform = Transform(Vec3(0.0f, 0.0f, 0.0f));
+            floorPrim.endTransform = floorPrim.startTransform;
+            {
+                auto mat = std::make_unique<Material>();
+                mat->color = Vec3(0.6f);
+                mat->roughness = 1.0f;
+                floorPrim.materialIndex = scene.AddMaterial(std::move(mat));
+            }
+            scene.AddPrimitive(floorPrim);
+
+            Primitive screenPrim;
+            screenPrim.type = ePlane;
+            screenPrim.plane.plane[0] = 0.0f;
+            screenPrim.plane.plane[1] = 1.0f;
+            screenPrim.plane.plane[2] = 0.0f;
+            screenPrim.plane.plane[3] = -1.0f; // y = 1
+            screenPrim.startTransform = Transform(Vec3(0.0f, 0.0f, 0.0f));
+            screenPrim.endTransform = screenPrim.startTransform;
+            {
+                auto mat = std::make_unique<Material>();
+                mat->color = Vec3(0.0f);
+                mat->opacity = screenOpacity;
+                screenPrim.materialIndex = scene.AddMaterial(std::move(mat));
+            }
+            scene.AddPrimitive(screenPrim);
+
+            Primitive lightPrim;
+            lightPrim.type = eSphere;
+            lightPrim.sphere.radius = 0.4f;
+            lightPrim.startTransform = Transform(Vec3(0.0f, 3.0f, 0.0f));
+            lightPrim.endTransform = lightPrim.startTransform;
+            {
+                auto mat = std::make_unique<Material>();
+                mat->emission = Vec3(8.0f);
+                lightPrim.materialIndex = scene.AddMaterial(std::move(mat));
+            }
+            lightPrim.lightSamples = 4;
+            scene.AddPrimitive(lightPrim);
+
+            scene.Build();
+        }
+    }
+
+    bool RunOpacityValidation()
+    {
+        bool pass = true;
+
+        // --- Sub-test 1: primary-ray cutout convergence --------------------
+        {
+            Scene scene;
+            BuildOpacityCutoutTestScene(scene);
+            uint32_t numPrimitives = (uint32_t)scene.primitives.size();
+
+            const Vec3 origin(0.0f, 0.0f, 6.0f);
+            const Vec3 dir(0.0f, 0.0f, -1.0f);
+
+            std::vector<GpuPathTraceTestCase> gpuCases;
+            gpuCases.reserve(kOpacitySampleCount);
+            for (int i = 0; i < kOpacitySampleCount; ++i)
+            {
+                GpuPathTraceTestCase gc{};
+                gc.originX = origin.x; gc.originY = origin.y; gc.originZ = origin.z;
+                gc.dirX = dir.x; gc.dirY = dir.y; gc.dirZ = dir.z;
+                gc.time = 0.0f;
+                gc.maxDepth = 1;
+                gc.seed = (uint32_t)(i * 2246822519u + 1u);
+                gc.numPrimitives = numPrimitives;
+                gpuCases.push_back(gc);
+            }
+
+            std::vector<GpuPathTraceTestResult> gpuResults(kOpacitySampleCount);
+            {
+                std::unique_ptr<VulkanRenderer> gpuRenderer(static_cast<VulkanRenderer *>(CreateVulkanRenderer(&scene)));
+                if (!gpuRenderer->IsAvailable())
+                {
+                    fprintf(stderr, "[M11 Opacity] FAIL: VulkanRenderer not available\n");
+                    return false;
+                }
+                gpuRenderer->RunPathTraceTest(gpuCases.data(), gpuResults.data(), kOpacitySampleCount);
+            }
+
+            int cpuHits = 0, gpuHits = 0;
+            double sumSq = 0.0;
+            int bad = 0;
+            for (int i = 0; i < kOpacitySampleCount; ++i)
+            {
+                Random rand(gpuCases[i].seed);
+                Vec3 cpuRadiance = PathTrace(scene, origin, dir, 0.0f, 1, rand);
+                Vec3 gpuRadiance(gpuResults[i].radianceX, gpuResults[i].radianceY, gpuResults[i].radianceZ);
+
+                bool cpuHit = cpuRadiance.x > 1.0f; // red channel: 3.0 on hit, 0.2 on see-through
+                bool gpuHit = gpuRadiance.x > 1.0f;
+                if (cpuHit) ++cpuHits;
+                if (gpuHit) ++gpuHits;
+
+                float d = Length(cpuRadiance - gpuRadiance);
+                sumSq += (double)d * d;
+                if (d > 1.e-3f || cpuHit != gpuHit)
+                {
+                    ++bad;
+                    printf("[M11 Opacity] MISMATCH sample=%d cpu=(%.3f,%.3f,%.3f) gpu=(%.3f,%.3f,%.3f)\n",
+                           i, cpuRadiance.x, cpuRadiance.y, cpuRadiance.z, gpuRadiance.x, gpuRadiance.y, gpuRadiance.z);
+                }
+            }
+
+            printf("[M11 Opacity] primary-ray RMSE=%f bad=%d/%d\n", sqrt(sumSq / kOpacitySampleCount), bad, kOpacitySampleCount);
+            pass = pass && (bad == 0);
+
+            // Statistical convergence - standard error of a
+            // Bernoulli(opacity) mean over kOpacitySampleCount trials is
+            // sqrt(p(1-p)/N); 4 sigma is a generous, still-tight bound.
+            float cpuHitFraction = float(cpuHits) / float(kOpacitySampleCount);
+            float gpuHitFraction = float(gpuHits) / float(kOpacitySampleCount);
+            float stdErr = sqrtf(kOpacityTestValue * (1.0f - kOpacityTestValue) / float(kOpacitySampleCount));
+            bool convergeOk = fabsf(cpuHitFraction - kOpacityTestValue) < 4.0f * stdErr &&
+                               fabsf(gpuHitFraction - kOpacityTestValue) < 4.0f * stdErr;
+            printf("[M11 Opacity] hit fraction: expected~%.3f cpu=%.3f gpu=%.3f (stdErr=%.3f) %s\n",
+                   kOpacityTestValue, cpuHitFraction, gpuHitFraction, stdErr, convergeOk ? "OK" : "MISMATCH");
+            pass = pass && convergeOk;
+        }
+
+        // --- Sub-test 2: shadow bleed-through monotonicity -----------------
+        {
+            const float opacities[3] = {0.0f, 1.0f, kOpacityTestValue}; // no-occluder, fully-blocked, cutout
+            Vec3 cpuMeans[3];
+            const int kShadowSampleCount = 32;
+            // Between the floor (y=-1) and the screen (y=1), not above the
+            // screen - the primary ray must reach the floor unobstructed so
+            // only the shadow ray (floor -> light) crosses the screen. An
+            // origin above the screen would make the *primary* ray hit the
+            // screen instead of the floor, invalidating this sub-test.
+            const Vec3 origin(0.0f, 0.0f, 0.0f);
+            const Vec3 dir(0.0f, -1.0f, 0.0f);
+
+            for (int variant = 0; variant < 3; ++variant)
+            {
+                Scene shadowScene;
+                BuildShadowCutoutTestScene(shadowScene, opacities[variant]);
+                uint32_t numPrims = (uint32_t)shadowScene.primitives.size();
+
+                std::vector<GpuPathTraceTestCase> gpuCases;
+                gpuCases.reserve(kShadowSampleCount);
+                for (int i = 0; i < kShadowSampleCount; ++i)
+                {
+                    GpuPathTraceTestCase gc{};
+                    gc.originX = origin.x; gc.originY = origin.y; gc.originZ = origin.z;
+                    gc.dirX = dir.x; gc.dirY = dir.y; gc.dirZ = dir.z;
+                    gc.time = 0.0f;
+                    gc.maxDepth = 1;
+                    gc.seed = (uint32_t)((variant * 97 + i) * 2246822519u + 1u);
+                    gc.numPrimitives = numPrims;
+                    gpuCases.push_back(gc);
+                }
+
+                std::vector<GpuPathTraceTestResult> gpuResults(kShadowSampleCount);
+                {
+                    std::unique_ptr<VulkanRenderer> gpuRenderer(static_cast<VulkanRenderer *>(CreateVulkanRenderer(&shadowScene)));
+                    if (!gpuRenderer->IsAvailable())
+                    {
+                        fprintf(stderr, "[M11 Opacity] FAIL: VulkanRenderer not available (shadow sub-test)\n");
+                        return false;
+                    }
+                    gpuRenderer->RunPathTraceTest(gpuCases.data(), gpuResults.data(), kShadowSampleCount);
+                }
+
+                Vec3 cpuSum(0.0f);
+                double sumSq = 0.0;
+                int bad = 0;
+                for (int i = 0; i < kShadowSampleCount; ++i)
+                {
+                    Random rand(gpuCases[i].seed);
+                    Vec3 cpuRadiance = PathTrace(shadowScene, origin, dir, 0.0f, 1, rand);
+                    Vec3 gpuRadiance(gpuResults[i].radianceX, gpuResults[i].radianceY, gpuResults[i].radianceZ);
+                    cpuSum += cpuRadiance;
+
+                    float d = Length(cpuRadiance - gpuRadiance);
+                    sumSq += (double)d * d;
+                    if (d > 1.e-3f)
+                        ++bad;
+                }
+                cpuMeans[variant] = cpuSum / float(kShadowSampleCount);
+
+                printf("[M11 Opacity] shadow screenOpacity=%.2f mean=(%.4f,%.4f,%.4f) RMSE=%f bad=%d/%d\n",
+                       opacities[variant], cpuMeans[variant].x, cpuMeans[variant].y, cpuMeans[variant].z,
+                       sqrt(sumSq / kShadowSampleCount), bad, kShadowSampleCount);
+                pass = pass && (bad == 0);
+            }
+
+            float noOccluder = cpuMeans[0].x;
+            float fullyBlocked = cpuMeans[1].x;
+            float cutout = cpuMeans[2].x;
+
+            bool blockedIsZero = fullyBlocked < 1.e-4f;
+            bool bracketed = cutout > fullyBlocked + 1.e-3f && cutout < noOccluder - 1.e-3f;
+            bool monotonicOk = blockedIsZero && bracketed;
+
+            printf("[M11 Opacity] shadow bleed-through: no-occluder=%.4f cutout(0.5)=%.4f fully-blocked=%.4f %s\n",
+                   noOccluder, cutout, fullyBlocked, monotonicOk ? "OK (strictly bracketed)" : "MISMATCH");
+            pass = pass && monotonicOk;
+        }
+
+        printf("[M11 Opacity] %s\n", pass ? "PASS" : "FAIL");
+        return pass;
+    }
+
     // M7 validation-only: CPU-only (no GPU/Vulkan involved - that's M8's job)
     // checks for TextureSampling.h's SampleTextureRGB/SampleTextureR against
     // hand-computed bilinear expected values, plus a textured-mesh render
@@ -1131,6 +1409,7 @@ namespace
             gpuMat.albedoTextureIndex = texIndex;
             gpuMat.roughnessTextureIndex = texIndex;
             gpuMat.metallicTextureIndex = texIndex;
+            gpuMat.opacityTextureIndex = texIndex;
 
             std::vector<Vec2> testUVs = {
                 Vec2(0.25f, 0.25f), Vec2(0.75f, 0.25f), Vec2(0.25f, 0.75f), Vec2(0.75f, 0.75f),
@@ -1191,6 +1470,7 @@ namespace
                     Vec3 cpuAlbedo = SampleTextureRGB(tex, testUVs[i]);
                     float cpuRoughness = SampleTextureR(tex, testUVs[i]);
                     float cpuMetallic = cpuRoughness; // same texture bound to both
+                    float cpuOpacity = SampleTextureAlpha(tex, testUVs[i]);
 
                     const GpuTextureSampleTestResult &gr = gpuResults[i];
                     Vec3 gpuAlbedo(gr.albedoR, gr.albedoG, gr.albedoB);
@@ -1198,14 +1478,16 @@ namespace
                     float dAlbedo = Length(cpuAlbedo - gpuAlbedo);
                     float dRoughness = fabsf(cpuRoughness - gr.roughness);
                     float dMetallic = fabsf(cpuMetallic - gr.metallic);
+                    float dOpacity = fabsf(cpuOpacity - gr.opacity);
 
                     sumSq += (double)dAlbedo * dAlbedo;
-                    if (dAlbedo > kTolerance || dRoughness > kTolerance || dMetallic > kTolerance)
+                    if (dAlbedo > kTolerance || dRoughness > kTolerance || dMetallic > kTolerance || dOpacity > kTolerance)
                     {
                         ++bad;
-                        printf("[M8 TextureSampling GPU]   MISMATCH uv=(%.2f,%.2f) cpu=(%.4f,%.4f,%.4f) gpu=(%.4f,%.4f,%.4f) d=%.6f\n",
+                        printf("[M8 TextureSampling GPU]   MISMATCH uv=(%.2f,%.2f) cpu=(%.4f,%.4f,%.4f) gpu=(%.4f,%.4f,%.4f) "
+                               "d=%.6f cpuOpacity=%.4f gpuOpacity=%.4f dOpacity=%.6f\n",
                                testUVs[i].x, testUVs[i].y, cpuAlbedo.x, cpuAlbedo.y, cpuAlbedo.z,
-                               gpuAlbedo.x, gpuAlbedo.y, gpuAlbedo.z, dAlbedo);
+                               gpuAlbedo.x, gpuAlbedo.y, gpuAlbedo.z, dAlbedo, cpuOpacity, gr.opacity, dOpacity);
                     }
                 }
                 printf("[M8 TextureSampling GPU] albedo RMSE=%f bad=%d/%zu\n",
@@ -1571,10 +1853,11 @@ int main()
         [](Scene &s) { BuildTexturedPathTraceTestScene(s); }, 0.01f, "textured-mesh");
     bool motionBlurPass = RunMotionBlurValidation();
     bool instancingPass = RunInstancingValidation();
+    bool opacityPass = RunOpacityValidation();
 
     bool pass = normalsPass && bsdfPass && pathTracePass && pathTraceProbePass && probePass &&
                 textureArraySpikePass && textureSamplingPass && pathTraceTexturedPass && motionBlurPass &&
-                instancingPass;
+                instancingPass && opacityPass;
     printf("%s\n", pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;
 }

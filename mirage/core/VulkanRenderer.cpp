@@ -57,9 +57,11 @@ namespace Mirage
             g.clearcoat = m.clearcoat;
             g.clearcoatGloss = m.clearcoatGloss;
             g.transmission = m.transmission;
+            g.opacity = m.opacity;
             g.albedoTextureIndex = m.albedoTextureIndex;
             g.roughnessTextureIndex = m.roughnessTextureIndex;
             g.metallicTextureIndex = m.metallicTextureIndex;
+            g.opacityTextureIndex = m.opacityTextureIndex;
             return g;
         }
     }

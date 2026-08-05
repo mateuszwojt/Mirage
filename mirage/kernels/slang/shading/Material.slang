@@ -1,9 +1,9 @@
 // Mirrors the Disney-BSDF-relevant fields of mirage/mirage/shaders/Material.h,
-// plus (as of M8) the three texture-index fields added there. The dead
+// plus (as of M8) the three texture-index fields added there, plus (Tier-1
+// "opacity/cutout transparency") opacity/opacityTextureIndex. The dead
 // albedoMap/bumpMap Texture fields are still not ported - bump mapping stays
-// dead code (nothing calls EvaluateBumpNormal), unrelated to the new albedo/
-// roughness/metallic texture-index fields below. GpuLayout.h's GpuMaterial is
-// the byte-identical C++ mirror.
+// dead code (nothing calls EvaluateBumpNormal), unrelated to the texture-index
+// fields below. GpuLayout.h's GpuMaterial is the byte-identical C++ mirror.
 
 import Constants;
 
@@ -25,10 +25,12 @@ struct GpuMaterial
     float clearcoat;
     float clearcoatGloss;
     float transmission;
+    float opacity; // 1.0 = fully opaque (default) - see TraceWithCutout in Trace.slang
 
     int albedoTextureIndex;
     int roughnessTextureIndex;
     int metallicTextureIndex;
+    int opacityTextureIndex; // -1 = none, use `opacity` scalar as-is
 };
 
 // Mirrors Material::GetIndexOfRefraction().
@@ -73,4 +75,16 @@ float Material_SampleMetallic(GpuMaterial mat, float2 uv)
     if (mat.metallicTextureIndex < 0)
         return mat.metallic;
     return g_Textures[mat.metallicTextureIndex].SampleLevel(uv, 0.0f).r;
+}
+
+// Mirrors TextureSampling.h's SampleTextureAlpha - used for opacity/cutout
+// transparency (see Trace.slang's TraceWithCutout). Unlike the other
+// Material_Sample* functions above, there is no "falls back to a scalar
+// when no texture is bound" case to worry about here at the call site: this
+// is only ever called after already checking opacityTextureIndex >= 0.
+float Material_SampleOpacity(GpuMaterial mat, float2 uv)
+{
+    if (mat.opacityTextureIndex < 0)
+        return mat.opacity;
+    return g_Textures[mat.opacityTextureIndex].SampleLevel(uv, 0.0f).a;
 }
