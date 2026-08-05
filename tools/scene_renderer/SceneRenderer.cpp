@@ -81,6 +81,136 @@ bool startsWith(const std::string &str, const std::string &prefix)
     return str.size() >= prefix.size() && str.compare(0, prefix.size(), prefix) == 0;
 }
 
+// Loads a UDIM tile set into one composited atlas Texture (Tier-2 "UDIM") -
+// see TextureSampling.h's UdimAtlasUV / Material.slang's mirror for how the
+// atlas is sampled once loaded, and that comment's note on this loader's
+// tile-placement convention (tile (0,0) = the atlas's top-left cell in
+// memory, u right, v down - no vertical flip needed relative to the
+// sampler). `patternPath` must contain the literal token "<UDIM>" exactly
+// once (already resolved to an absolute/baseDir-relative path by the
+// caller); every file in patternPath's directory matching
+// "<prefix><digits><suffix>" is treated as one tile, keyed by the standard
+// UDIM numbering (1001 + u + 10*v). Returns nullptr (logging via stderr,
+// same "missing/broken texture doesn't fail the whole scene load"
+// convention as LoadTextureFromFile) if no tiles are found or tiles
+// disagree on resolution - a partial/malformed UDIM set shouldn't silently
+// misrender.
+std::unique_ptr<Texture> LoadUdimAtlas(const std::string &patternPath, TextureColorSpace space)
+{
+    const std::string kToken = "<UDIM>";
+    size_t tokenPos = patternPath.find(kToken);
+    if (tokenPos == std::string::npos)
+        return nullptr;
+
+    std::string prefix = patternPath.substr(0, tokenPos);
+    std::string suffix = patternPath.substr(tokenPos + kToken.size());
+
+    std::filesystem::path dir = std::filesystem::path(prefix).parent_path();
+    std::string filePrefix = std::filesystem::path(prefix).filename().string();
+    if (dir.empty())
+        dir = ".";
+
+    struct Tile
+    {
+        int u, v;
+        std::unique_ptr<Texture> tex;
+    };
+    std::vector<Tile> tiles;
+
+    std::error_code ec;
+    for (const auto &entry : std::filesystem::directory_iterator(dir, ec))
+    {
+        if (ec || !entry.is_regular_file())
+            continue;
+
+        std::string name = entry.path().filename().string();
+        if (name.size() <= filePrefix.size() + suffix.size())
+            continue;
+        if (name.compare(0, filePrefix.size(), filePrefix) != 0)
+            continue;
+        if (name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0)
+            continue;
+
+        std::string digits = name.substr(filePrefix.size(), name.size() - filePrefix.size() - suffix.size());
+        if (digits.empty() || !std::all_of(digits.begin(), digits.end(), [](unsigned char c) { return std::isdigit(c); }))
+            continue;
+
+        int udim = std::stoi(digits);
+        int u = (udim - 1001) % 10;
+        int v = (udim - 1001) / 10;
+        if (u < 0 || v < 0)
+        {
+            std::cerr << "LoadUdimAtlas: skipping tile with out-of-range UDIM number " << udim
+                       << " (" << name << ")" << std::endl;
+            continue;
+        }
+
+        // generateMips=false - mips are generated once for the whole
+        // composited atlas below (see the plan's note that per-tile mip
+        // generation would need to happen twice - once per tile, once for
+        // the atlas - to no benefit, since only the atlas's own mip chain
+        // is ever sampled).
+        auto tex = LoadTextureFromFile(entry.path().string(), space, /*generateMips=*/false);
+        if (!tex)
+            continue;
+
+        tiles.push_back(Tile{u, v, std::move(tex)});
+    }
+
+    if (tiles.empty())
+    {
+        std::cerr << "LoadUdimAtlas: no tiles found matching pattern '" << patternPath << "'" << std::endl;
+        return nullptr;
+    }
+
+    int tileW = tiles[0].tex->width;
+    int tileH = tiles[0].tex->height;
+    int gridW = 0, gridH = 0;
+    for (const auto &t : tiles)
+    {
+        gridW = std::max(gridW, t.u + 1);
+        gridH = std::max(gridH, t.v + 1);
+        if (t.tex->width != tileW || t.tex->height != tileH)
+        {
+            std::cerr << "LoadUdimAtlas: tile resolution mismatch (expected " << tileW << "x" << tileH
+                       << ", got " << t.tex->width << "x" << t.tex->height << ") - rejecting UDIM set '"
+                       << patternPath << "'" << std::endl;
+            return nullptr;
+        }
+    }
+
+    auto atlas = std::make_unique<Texture>();
+    atlas->width = gridW * tileW;
+    atlas->height = gridH * tileH;
+    atlas->depth = 1;
+    atlas->udimGridWidth = gridW;
+    atlas->udimGridHeight = gridH;
+    size_t atlasTexelCount = (size_t)atlas->width * (size_t)atlas->height * 4;
+    atlas->data = new float[atlasTexelCount];
+    // Unpopulated cells (a sparse UDIM set, e.g. tiles 1001 and 1050 with
+    // nothing authored in between) stay black rather than garbage.
+    std::fill(atlas->data, atlas->data + atlasTexelCount, 0.0f);
+
+    for (const auto &t : tiles)
+    {
+        int originX = t.u * tileW;
+        int originY = t.v * tileH;
+        for (int y = 0; y < tileH; ++y)
+        {
+            const float *srcRow = t.tex->data + (size_t)y * tileW * 4;
+            float *dstRow = atlas->data + ((size_t)(originY + y) * atlas->width + originX) * 4;
+            std::copy(srcRow, srcRow + (size_t)tileW * 4, dstRow);
+        }
+    }
+
+    // Known artifact, accepted per the plan: box-filtering across the whole
+    // atlas doesn't know about tile boundaries, so coarse mip levels
+    // visibly bleed neighboring tiles' edge texels together. A per-tile-
+    // padded atlas layout would fix this but is out of scope here.
+    atlas->GenerateMips();
+    return atlas;
+}
+
 // Material definition class
 class MaterialDefinition
 {
@@ -424,6 +554,19 @@ public:
                 if (relPath.empty())
                     return -1;
                 std::string resolvedPath = baseDir.empty() ? relPath : (std::filesystem::path(baseDir) / relPath).string();
+
+                // A literal "<UDIM>" token dispatches to the atlas loader
+                // instead of a plain single-file load - every other
+                // (non-UDIM) material map path is completely unaffected by
+                // this check.
+                if (resolvedPath.find("<UDIM>") != std::string::npos)
+                {
+                    auto atlas = LoadUdimAtlas(resolvedPath, space);
+                    if (!atlas)
+                        return -1;
+                    return scene.FindOrAddTexture(resolvedPath, std::move(atlas));
+                }
+
                 auto tex = LoadTextureFromFile(resolvedPath, space);
                 if (!tex)
                     return -1;
@@ -631,7 +774,7 @@ public:
                 }
             }
         }
-
+        
         // If we're still in a block at the end of the file, handle it
         if (inBlock && currentSection == "primitive") {
             std::cout << "Debug: Adding final primitive to list" << std::endl;
@@ -651,6 +794,7 @@ public:
             sky = currentSky;
             hasSky = true;
         }
+
 
         std::cout << "Debug: Parsing complete. Found " << materials.size() << " materials and " << primitives.size() << " primitives" << std::endl;
         
@@ -1101,6 +1245,7 @@ int main(int argc, char *argv[])
     options.filter = Filter(FilterType::eFilterGaussian, 1.0f, 2.0f);
     options.exposure = 1.0f;
     options.clamp = 10.0f;
+    options.enableDOF = false;
 
     // Compose the manual exposure multiplier above with any physically-
     // derived one from the camera's fStop/shutterSpeed/iso (see
@@ -1108,7 +1253,6 @@ int main(int argc, char *argv[])
     // scene's camera block set all three, so this is a no-op for every
     // scene that doesn't opt into physical exposure.
     options.exposure *= scene.camera->ComputeExposureMultiplier();
-    options.enableDOF = false;
 
     // Allocate memory for output image
     std::cout << "Debug: Allocating memory for output image" << std::endl;

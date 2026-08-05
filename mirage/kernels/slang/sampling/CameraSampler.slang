@@ -14,6 +14,7 @@ struct GpuCamera
     float focalPoint;
     uint enableDOF;
     float shutterStart, shutterEnd;
+    float fovY; // Tier-2 "mipmapping" - see GpuLayout.h's GpuCamera comment
 };
 
 void CameraSampler_GenerateRay(GpuCamera cam, float rasterX, float rasterY, inout Random rand,

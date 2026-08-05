@@ -49,9 +49,13 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     GpuMaterial mat = g_Materials[tc.materialIndex];
 
     TextureSampleTestResult result;
-    result.albedo = Material_SampleAlbedo(mat, tc.uv);
-    result.roughness = Material_SampleRoughness(mat, tc.uv);
-    result.metallic = Material_SampleMetallic(mat, tc.uv);
+    // 0.0f mip level - this is an isolated function-call comparison (no mip
+    // heuristic/camera involved), same reasoning as every other Material_
+    // Sample* test call here always having used level 0 implicitly before
+    // mipLevel became a required parameter.
+    result.albedo = Material_SampleAlbedo(mat, tc.uv, 0.0f);
+    result.roughness = Material_SampleRoughness(mat, tc.uv, 0.0f);
+    result.metallic = Material_SampleMetallic(mat, tc.uv, 0.0f);
     result.opacity = Material_SampleOpacity(mat, tc.uv);
 
     g_Results[i] = result;

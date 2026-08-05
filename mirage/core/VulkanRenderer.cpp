@@ -138,6 +138,12 @@ namespace Mirage
         static const uint32_t kMaxMaterialTextures = 32;
         std::vector<ComPtr<ITexture>> materialTextures;
         ComPtr<ISampler> materialTextureSampler;
+        // Per-slot width/height/UDIM-grid metadata (Tier-2 "mipmapping"/
+        // "UDIM"), built alongside materialTextures by UploadMaterialTextures()
+        // and uploaded as textureInfoBuf by UploadScene() - see
+        // UploadMaterialTextures()'s comment.
+        std::vector<GpuTextureInfo> textureInfos;
+        ComPtr<IBuffer> textureInfoBuf;
 
         // HDR environment probe (sampling/Probe.slang). Always populated -
         // with a 1x1 black dummy when the scene has no valid probe - since
@@ -361,20 +367,46 @@ namespace Mirage
         // same reason UploadProbe() always binds *something*: the compute
         // pipeline's descriptor layout is fixed at link time regardless of how
         // many textures the current scene actually has.
+        //
+        // Also builds textureInfos (Tier-2 "mipmapping"/"UDIM") in lockstep,
+        // one GpuTextureInfo per slot - PathTrace.slang's mip-level heuristic
+        // needs a texture's base width/height to convert a world-space
+        // footprint into a mip level (SampleLevel() itself needs no
+        // dimensions, but choosing *which* level to ask for does), and
+        // Material_Sample*'s UDIM remap needs the grid dimensions. See
+        // UploadScene() for where textureInfosBuf is actually created (kept
+        // there, not here, since every other scene-level buffer is created
+        // together at the end of UploadScene() - this function only builds
+        // the CPU-side vector).
         void UploadMaterialTextures()
         {
             materialTextures.clear();
             materialTextures.resize(kMaxMaterialTextures);
+            textureInfos.clear();
+            textureInfos.resize(kMaxMaterialTextures);
 
             SamplerDesc samplerDesc = {};
             samplerDesc.minFilter = TextureFilteringMode::Linear;
             samplerDesc.magFilter = TextureFilteringMode::Linear;
+            samplerDesc.mipFilter = TextureFilteringMode::Linear;
             samplerDesc.addressU = TextureAddressingMode::Wrap;
             samplerDesc.addressV = TextureAddressingMode::Wrap;
             samplerDesc.addressW = TextureAddressingMode::Wrap;
             device->createSampler(samplerDesc, materialTextureSampler.writeRef());
 
             const size_t realCount = scene ? scene->textures.size() : 0;
+            if (realCount > kMaxMaterialTextures)
+            {
+                // Slots >= kMaxMaterialTextures silently fall back to the
+                // dummy white texture below with no error today - UDIM
+                // atlases make hitting this ceiling considerably more
+                // likely than before (one atlas per UDIM material, vs. one
+                // slot per ordinary texture), so surface it explicitly
+                // rather than let materials quietly render wrong.
+                fprintf(stderr, "VulkanRenderer: scene has %zu textures, exceeding kMaxMaterialTextures (%u) - "
+                                 "textures at index >= %u will render as opaque white on the GPU backend.\n",
+                        realCount, kMaxMaterialTextures, kMaxMaterialTextures);
+            }
 
             for (uint32_t i = 0; i < kMaxMaterialTextures; ++i)
             {
@@ -389,22 +421,62 @@ namespace Mirage
                 {
                     texDesc.size = {(uint32_t)tex->width, (uint32_t)tex->height, 1};
 
-                    SubresourceData sub = {};
-                    sub.data = tex->data;
-                    sub.rowPitch = (Size)tex->width * sizeof(float4_);
-                    sub.slicePitch = 0;
-                    device->createTexture(texDesc, &sub, materialTextures[i].writeRef());
+                    GpuTextureInfo info{};
+                    info.width = tex->width;
+                    info.height = tex->height;
+                    info.udimGridWidth = tex->udimGridWidth;
+                    info.udimGridHeight = tex->udimGridHeight;
+                    textureInfos[i] = info;
+
+                    if (tex->mipCount > 1 && tex->mipData)
+                    {
+                        // Full mip chain: one subresource per level, ordered
+                        // mip 0..mipCount-1 (single array layer, so
+                        // subresource index == mip index directly - see
+                        // TextureDesc::getSubresourceCount()'s doc comment).
+                        texDesc.mipCount = (uint32_t)tex->mipCount;
+
+                        std::vector<SubresourceData> subs((size_t)tex->mipCount);
+                        for (int level = 0; level < tex->mipCount; ++level)
+                        {
+                            subs[level].data = tex->mipData[level];
+                            subs[level].rowPitch = (Size)tex->mipWidths[level] * sizeof(float4_);
+                            subs[level].slicePitch = 0;
+                        }
+                        device->createTexture(texDesc, subs.data(), materialTextures[i].writeRef());
+                    }
+                    else
+                    {
+                        // No mip chain generated (e.g. GenerateMips() was
+                        // skipped, or the texture predates this feature) -
+                        // single level, exactly the pre-mipmapping behavior.
+                        texDesc.mipCount = 1;
+
+                        SubresourceData sub = {};
+                        sub.data = tex->data;
+                        sub.rowPitch = (Size)tex->width * sizeof(float4_);
+                        sub.slicePitch = 0;
+                        device->createTexture(texDesc, &sub, materialTextures[i].writeRef());
+                    }
                 }
                 else
                 {
                     std::vector<float4_> white{{1.0f, 1.0f, 1.0f, 1.0f}};
                     texDesc.size = {1, 1, 1};
+                    texDesc.mipCount = 1;
 
                     SubresourceData sub = {};
                     sub.data = white.data();
                     sub.rowPitch = sizeof(float4_);
                     sub.slicePitch = 0;
                     device->createTexture(texDesc, &sub, materialTextures[i].writeRef());
+
+                    GpuTextureInfo info{};
+                    info.width = 1;
+                    info.height = 1;
+                    info.udimGridWidth = 1;
+                    info.udimGridHeight = 1;
+                    textureInfos[i] = info;
                 }
             }
         }
@@ -568,14 +640,7 @@ namespace Mirage
 
             UploadProbe();
             UploadMaterialTextures();
-
-            std::vector<GpuLight> lights;
-            lights.reserve(scene->lights.size());
-            for (const PunctualLight &light : scene->lights)
-                lights.push_back(ConvertLight(light));
-            numLightsUploaded = (uint32_t)lights.size();
-            if (lights.empty())
-                lights.push_back(GpuLight{}); // dummy - never indexed, numLightsUploaded stays 0
+            textureInfoBuf = CreateStructuredBuffer(textureInfos);
 
             GpuSky gsky{};
             gsky.horizonX = scene->sky.horizon.x; gsky.horizonY = scene->sky.horizon.y; gsky.horizonZ = scene->sky.horizon.z;
@@ -589,6 +654,14 @@ namespace Mirage
             sceneBvhNodes.reserve(scene->bvh.numNodes);
             for (int i = 0; i < scene->bvh.numNodes; ++i)
                 sceneBvhNodes.push_back(ConvertBVHNode(scene->bvh.nodes[i]));
+
+            std::vector<GpuLight> lights;
+            lights.reserve(scene->lights.size());
+            for (const PunctualLight &light : scene->lights)
+                lights.push_back(ConvertLight(light));
+            numLightsUploaded = (uint32_t)lights.size();
+            if (lights.empty())
+                lights.push_back(GpuLight{}); // dummy - never indexed, numLightsUploaded stays 0
 
             primitivesBuf = CreateStructuredBuffer(primitives);
             meshDescBuf = CreateStructuredBuffer(meshDescs);
@@ -626,6 +699,7 @@ namespace Mirage
             gcam.enableDOF = options.enableDOF ? 1u : 0u;
             gcam.shutterStart = camera.shutterStart;
             gcam.shutterEnd = camera.shutterEnd;
+            gcam.fovY = camera.EffectiveFov();
             return gcam;
         }
 
@@ -784,6 +858,7 @@ namespace Mirage
                 cursor["g_UVs"].setBinding(uvsBuf);
                 cursor["g_Materials"].setBinding(materialsBuf);
                 BindMaterialTextures(cursor);
+                cursor["g_TextureInfo"].setBinding(textureInfoBuf);
                 cursor["g_Sky"].setBinding(skyBuf);
                 cursor["g_Lights"].setBinding(lightsBuf);
                 cursor["g_ProbeTexture"].setBinding(Binding(probeTexture, probeSampler));
@@ -919,6 +994,7 @@ namespace Mirage
                 cursor["g_UVs"].setBinding(uvsBuf);
                 cursor["g_Materials"].setBinding(materialsBuf);
                 BindMaterialTextures(cursor);
+                cursor["g_TextureInfo"].setBinding(textureInfoBuf);
                 cursor["g_Sky"].setBinding(skyBuf);
                 cursor["g_Lights"].setBinding(lightsBuf);
                 cursor["g_ProbeTexture"].setBinding(Binding(probeTexture, probeSampler));
@@ -1274,6 +1350,11 @@ namespace Mirage
                                    const GpuTextureSampleTestCase *cases, GpuTextureSampleTestResult *results, int count)
         {
             UploadMaterialTextures();
+            // Material.slang's Material_Sample* functions now reference
+            // g_TextureInfo (UDIM remap) unconditionally - this standalone
+            // test bypasses UploadScene() (where that buffer is normally
+            // created), so it needs its own copy here.
+            ComPtr<IBuffer> testTextureInfoBuf = CreateStructuredBuffer(textureInfos);
 
             std::vector<GpuMaterial> materialsVec(materials, materials + materialCount);
             ComPtr<IBuffer> testMaterialsBuf = CreateStructuredBuffer(materialsVec);
@@ -1331,6 +1412,7 @@ namespace Mirage
                 cursor["g_Cases"].setBinding(casesBuf);
                 cursor["g_Results"].setBinding(resultsBuf);
                 BindMaterialTextures(cursor);
+                cursor["g_TextureInfo"].setBinding(testTextureInfoBuf);
 
                 uint32_t groups = ((uint32_t)count + 63) / 64;
                 passEncoder->dispatchCompute(groups, 1, 1);

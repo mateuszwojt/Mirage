@@ -58,7 +58,8 @@ namespace Mirage
     // mangled symbol still reflects the full parameter list, so this
     // declaration must match exactly or the link fails).
     Vec3 PathTrace(const Scene &scene, const Vec3 &startOrigin, const Vec3 &startDir, float time, int maxDepth, Random &rand,
-                   float *outDepth = nullptr, Vec3 *outNormal = nullptr, const Primitive **outHitPrim = nullptr);
+                   float *outDepth = nullptr, Vec3 *outNormal = nullptr, const Primitive **outHitPrim = nullptr,
+                   float cameraFovY = 0.0f, int imageHeight = 0);
 }
 
 namespace
@@ -643,7 +644,14 @@ namespace
     // reasoning as the two original call sites' differing atol, just made an
     // explicit parameter instead of an internal useProbe branch now that a
     // third, non-probe-related deviation source exists.
-    bool RunPathTraceValidation(const std::function<void(Scene &)> &buildScene, float atol, const char *label)
+    // cameraFovY/imageHeight (Tier-2 "mipmapping") are optional - 0/0 (the
+    // default) disables the mip-level heuristic on both backends, exactly
+    // every pre-existing call site's behavior. A caller that wants to
+    // exercise mip sampling (see RunMipmapValidation below) passes a real
+    // FOV/height so PathTrace's MipLevelFromHitDistance actually picks a
+    // non-zero level for some of the 32x32 test rays.
+    bool RunPathTraceValidation(const std::function<void(Scene &)> &buildScene, float atol, const char *label,
+                                 float cameraFovY = 0.0f, int imageHeight = 0)
     {
         const int gridW = 32;
         const int gridH = 32;
@@ -679,6 +687,8 @@ namespace
                 gc.seed = in.seed;
                 gc.numPrimitives = numPrimitives;
                 gc.numLights = numLights;
+                gc.cameraFovY = cameraFovY;
+                gc.imageHeight = (uint32_t)imageHeight;
                 gpuCases.push_back(gc);
             }
         }
@@ -711,7 +721,8 @@ namespace
             const GpuPathTraceTestResult &gr = gpuResults[i];
 
             Random rand(in.seed);
-            Vec3 cpuRadiance = PathTrace(scene, in.origin, in.dir, in.time, in.maxDepth, rand);
+            Vec3 cpuRadiance = PathTrace(scene, in.origin, in.dir, in.time, in.maxDepth, rand,
+                                          nullptr, nullptr, nullptr, cameraFovY, imageHeight);
             Vec3 gpuRadiance(gr.radianceX, gr.radianceY, gr.radianceZ);
 
             float d = Length(cpuRadiance - gpuRadiance);
@@ -1994,6 +2005,185 @@ namespace
         scene.Build();
     }
 
+    // Tier-2 "mipmapping": procedural high-frequency (4-texel cell)
+    // checkerboard, mipped down to 1x1 via Texture::GenerateMips() - used by
+    // BuildMipmapTestScene below to exercise a real, multi-level mip chain
+    // on both backends (unlike MakeTest2x2Texture, which has no mip chain
+    // at all - mipCount stays 0/1).
+    Texture MakeCheckerboardTexture(int size)
+    {
+        Texture tex;
+        tex.width = size;
+        tex.height = size;
+        tex.depth = 1;
+        tex.data = new float[(size_t)size * (size_t)size * 4];
+        for (int y = 0; y < size; ++y)
+        {
+            for (int x = 0; x < size; ++x)
+            {
+                bool white = ((x / 4) + (y / 4)) % 2 == 0;
+                int idx = (y * size + x) * 4;
+                float v = white ? 1.0f : 0.0f;
+                tex.data[idx + 0] = v;
+                tex.data[idx + 1] = v;
+                tex.data[idx + 2] = v;
+                tex.data[idx + 3] = 1.0f;
+            }
+        }
+        tex.GenerateMips();
+        return tex;
+    }
+
+    // A large, steeply receding quad (z spans -40..-5, well within
+    // GeneratePathTraceTestCase's +-20-degree ray fan from origin
+    // (0,0,6)) textured with the high-frequency checkerboard above and a
+    // UV range wide enough (20x20 repeats) to be a meaningfully different
+    // texture footprint at the near vs. far edge - exercises
+    // MipLevelFromHitDistance picking different mip levels for different
+    // rays in the same 32x32 grid RunPathTraceValidation sends, not just a
+    // single fixed level. Lit by an emissive sphere (same as every other
+    // scene here) so the albedo term is actually visible in the result via
+    // SampleLights' NEE integration.
+    void BuildMipmapTestScene(Scene &scene)
+    {
+        auto mesh = std::make_unique<Mesh>();
+        mesh->vertices = {
+            Vec3(-10.0f, -6.0f, -40.0f),
+            Vec3(10.0f, -6.0f, -40.0f),
+            Vec3(10.0f, 6.0f, -5.0f),
+            Vec3(-10.0f, 6.0f, -5.0f),
+        };
+        mesh->uvs = {Vec2(0.0f, 0.0f), Vec2(20.0f, 0.0f), Vec2(20.0f, 20.0f), Vec2(0.0f, 20.0f)};
+        mesh->indices = {0, 1, 2, 0, 2, 3};
+        mesh->CalculateNormals();
+        mesh->rebuildBVH();
+
+        Primitive meshPrim;
+        meshPrim.type = eMesh;
+        meshPrim.startTransform = Transform(Vec3(0.0f, 0.0f, 0.0f));
+        meshPrim.endTransform = meshPrim.startTransform;
+        meshPrim.mesh = GeometryFromMesh(mesh.get());
+        {
+            auto texPtr = std::make_unique<Texture>(MakeCheckerboardTexture(64));
+            int texIndex = scene.AddTexture(std::move(texPtr));
+
+            auto mat = std::make_unique<Material>();
+            mat->color = Vec3(1.0f, 1.0f, 1.0f);
+            mat->roughness = 1.0f;
+            mat->albedoTextureIndex = texIndex;
+            meshPrim.materialIndex = scene.AddMaterial(std::move(mat));
+        }
+        meshPrim.mesh.meshIndex = scene.AddMesh(std::move(mesh));
+        scene.AddPrimitive(meshPrim);
+
+        Primitive lightPrim;
+        lightPrim.type = eSphere;
+        lightPrim.sphere.radius = 1.0f;
+        lightPrim.startTransform = Transform(Vec3(0.0f, 8.0f, 3.0f));
+        lightPrim.endTransform = lightPrim.startTransform;
+        {
+            auto lightMat = std::make_unique<Material>();
+            lightMat->emission = Vec3(10.0f, 10.0f, 9.0f);
+            lightPrim.materialIndex = scene.AddMaterial(std::move(lightMat));
+        }
+        lightPrim.lightSamples = 2;
+        scene.AddPrimitive(lightPrim);
+
+        scene.Build();
+    }
+
+    // Tier-2 "UDIM": a 2x1-tile atlas (udimGridWidth=2, udimGridHeight=1)
+    // with a solid, distinguishable color per tile - tile (0,0) red, tile
+    // (1,0) green - built directly (not via SceneRenderer.cpp's file-based
+    // LoadUdimAtlas, which this test harness has no dependency on) so the
+    // resulting Texture is byte-identical to what a real UDIM material
+    // would produce: one composited Texture with udimGridWidth/Height set,
+    // sampled through the exact same UdimAtlasUV remap on both backends.
+    Texture MakeUdimTestAtlas()
+    {
+        const int tileSize = 8;
+        const int gridW = 2, gridH = 1;
+
+        Texture tex;
+        tex.width = tileSize * gridW;
+        tex.height = tileSize * gridH;
+        tex.depth = 1;
+        tex.udimGridWidth = gridW;
+        tex.udimGridHeight = gridH;
+        tex.data = new float[(size_t)tex.width * (size_t)tex.height * 4];
+        for (int y = 0; y < tex.height; ++y)
+        {
+            for (int x = 0; x < tex.width; ++x)
+            {
+                int tileU = x / tileSize;
+                int idx = (y * tex.width + x) * 4;
+                if (tileU == 0)
+                {
+                    tex.data[idx + 0] = 1.0f; tex.data[idx + 1] = 0.0f; tex.data[idx + 2] = 0.0f; tex.data[idx + 3] = 1.0f;
+                }
+                else
+                {
+                    tex.data[idx + 0] = 0.0f; tex.data[idx + 1] = 1.0f; tex.data[idx + 2] = 0.0f; tex.data[idx + 3] = 1.0f;
+                }
+            }
+        }
+        tex.GenerateMips();
+        return tex;
+    }
+
+    // Same quad shape as BuildTexturedPathTraceTestScene, but UVs span
+    // [0,2]x[0,1] (two UDIM tiles' worth) instead of [0,1]x[0,1] - the
+    // quad's left half samples tile (0,0) (red), right half samples tile
+    // (1,0) (green), exercising UdimAtlasUV's tile-select + local-UV remap
+    // on both backends via the standard RunPathTraceValidation comparison.
+    void BuildUdimTestScene(Scene &scene)
+    {
+        auto mesh = std::make_unique<Mesh>();
+        mesh->vertices = {
+            Vec3(-0.7f, -0.7f, 0.0f),
+            Vec3(0.7f, -0.7f, 0.0f),
+            Vec3(0.7f, 0.7f, 0.0f),
+            Vec3(-0.7f, 0.7f, 0.0f),
+        };
+        mesh->uvs = {Vec2(0.0f, 0.0f), Vec2(2.0f, 0.0f), Vec2(2.0f, 1.0f), Vec2(0.0f, 1.0f)};
+        mesh->indices = {0, 1, 2, 0, 2, 3};
+        mesh->CalculateNormals();
+        mesh->rebuildBVH();
+
+        Primitive meshPrim;
+        meshPrim.type = eMesh;
+        meshPrim.startTransform = Transform(Vec3(0.0f, 0.0f, 0.0f));
+        meshPrim.endTransform = meshPrim.startTransform;
+        meshPrim.mesh = GeometryFromMesh(mesh.get());
+        {
+            auto texPtr = std::make_unique<Texture>(MakeUdimTestAtlas());
+            int texIndex = scene.AddTexture(std::move(texPtr));
+
+            auto mat = std::make_unique<Material>();
+            mat->color = Vec3(1.0f, 1.0f, 1.0f);
+            mat->roughness = 0.8f;
+            mat->albedoTextureIndex = texIndex;
+            meshPrim.materialIndex = scene.AddMaterial(std::move(mat));
+        }
+        meshPrim.mesh.meshIndex = scene.AddMesh(std::move(mesh));
+        scene.AddPrimitive(meshPrim);
+
+        Primitive lightPrim;
+        lightPrim.type = eSphere;
+        lightPrim.sphere.radius = 0.5f;
+        lightPrim.startTransform = Transform(Vec3(0.0f, 3.0f, 1.0f));
+        lightPrim.endTransform = lightPrim.startTransform;
+        {
+            auto lightMat = std::make_unique<Material>();
+            lightMat->emission = Vec3(8.0f, 8.0f, 7.0f);
+            lightPrim.materialIndex = scene.AddMaterial(std::move(lightMat));
+        }
+        lightPrim.lightSamples = 2;
+        scene.AddPrimitive(lightPrim);
+
+        scene.Build();
+    }
+
     // M5 validation-only: go/no-go spike for binding an *array* of combined
     // image samplers (Sampler2D g_Textures[N]) via slang-rhi's ShaderCursor -
     // see the plan's "M5 - Texture-array binding spike" section and
@@ -2178,10 +2368,26 @@ int main()
     // known CPU/GPU deviation source (no probe, no textures).
     bool punctualLightsPass = RunPathTraceValidation(
         [](Scene &s) { BuildPunctualAndAreaLightTestScene(s); }, 0.01f, "punctual+area lights");
+    // Tier-2 "mipmapping" - see BuildMipmapTestScene's comment. atol is
+    // looser than the plain textured-mesh case (0.01) since trilinear mip
+    // blending is a second interpolation stage on top of bilinear, and the
+    // CPU's hand-rolled SampleTrilinear vs. the GPU's hardware
+    // Sampler2D.SampleLevel trilinear are two independent implementations
+    // of the same math, not guaranteed bit-identical (matching the
+    // reasoning behind M8's own bilinear tolerance).
+    bool mipmapPass = RunPathTraceValidation(
+        [](Scene &s) { BuildMipmapTestScene(s); }, 0.03f, "mipmapped-quad", DegToRad(45.0f), 64);
+    // Tier-2 "UDIM" - see BuildUdimTestScene's comment. Tight tolerance
+    // (matches textured-mesh) since UDIM introduces no new interpolation
+    // source, just a UV remap before the same bilinear sampling every other
+    // textured test already validates.
+    bool udimPass = RunPathTraceValidation(
+        [](Scene &s) { BuildUdimTestScene(s); }, 0.01f, "udim-quad");
 
     bool pass = normalsPass && bsdfPass && pathTracePass && pathTraceProbePass && probePass &&
                 textureArraySpikePass && textureSamplingPass && pathTraceTexturedPass && motionBlurPass &&
-                instancingPass && opacityPass && normalMappingPass && punctualLightsPass;
+                instancingPass && opacityPass && normalMappingPass && punctualLightsPass &&
+                mipmapPass && udimPass;
     printf("%s\n", pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;
 }

@@ -362,9 +362,38 @@ namespace Mirage
 		return sum;
 	}
 
-	// reference, no light sampling, uniform hemisphere sampling
+	// Approximate mip level from a primary-ray hit distance - a pragmatic
+	// stand-in for true ray differentials/cone tracing (not implemented;
+	// this is a known-approximate placeholder, not a claim of physical
+	// accuracy). Estimates a pixel's angular size from the camera's vertical
+	// FOV and image height, scales by hit distance to get an approximate
+	// world-space texel footprint, and converts that to a mip level via
+	// log2 against the texture's largest dimension - the same basic
+	// "footprint in texels -> log2" idea every mip-selection scheme uses,
+	// just without the anisotropic/ray-differential precision. Deliberately
+	// only ever called for i==0 (primary-ray) hits in PathTrace() below -
+	// indirect bounces use mip 0 (roughness-based footprint growth is out of
+	// scope for this milestone).
+	inline float MipLevelFromHitDistance(float hitT, float cameraFovY, int imageHeight, int texWidth, int texHeight, float mipBiasScale = 1.0f)
+	{
+		if (cameraFovY <= 0.0f || imageHeight <= 0 || texWidth <= 0 || texHeight <= 0)
+			return 0.0f;
+
+		float pixelAngularSize = 2.0f * tanf(cameraFovY * 0.5f) / float(imageHeight);
+		float worldFootprint = hitT * pixelAngularSize;
+		float texelFootprint = worldFootprint * mipBiasScale * float(Max(texWidth, texHeight));
+		return log2f(Max(1.0f, texelFootprint));
+	}
+
+	// reference, no light sampling, uniform hemisphere sampling. cameraFovY/
+	// imageHeight (Tier-2 "mipmapping") are optional - 0 (the default) means
+	// "no mip heuristic available, always sample mip level 0," which is
+	// every pre-existing call site's exact prior behavior (RunPathTraceValidation's
+	// direct PathTrace() calls in kernel_validate, in particular, are not
+	// expected to change).
 	Vec3 PathTrace(const Scene &scene, const Vec3 &startOrigin, const Vec3 &startDir, float time, int maxDepth, Random &rand,
-				   float *outDepth = nullptr, Vec3 *outNormal = nullptr, const Primitive **outHitPrim = nullptr)
+				   float *outDepth = nullptr, Vec3 *outNormal = nullptr, const Primitive **outHitPrim = nullptr,
+				   float cameraFovY = 0.0f, int imageHeight = 0)
 	{
 		// Primary-ray AOV capture defaults - overwritten below on a primary-ray
 		// hit (i == 0). Left at these sentinels on a primary-ray miss, so a
@@ -409,23 +438,35 @@ namespace Mirage
 				// texture-indexed material on a primitive with no UV data just
 				// samples texel (0,0) uniformly, which is safe, not a crash.
 				Material shadedMaterial = ResolveMaterial(scene, hit->materialIndex);
+
+				// See MipLevelFromHitDistance's comment - only computed (and
+				// non-zero) for the primary ray; indirect bounces sample mip
+				// 0, same as before this feature existed.
+				float mipLevel = 0.0f;
+				if (i == 0 && shadedMaterial.albedoTextureIndex >= 0)
+				{
+					const Texture *tex = scene.GetTexture(shadedMaterial.albedoTextureIndex);
+					if (tex)
+						mipLevel = MipLevelFromHitDistance(t, cameraFovY, imageHeight, tex->width, tex->height);
+				}
+
 				if (shadedMaterial.albedoTextureIndex >= 0)
 				{
 					const Texture *tex = scene.GetTexture(shadedMaterial.albedoTextureIndex);
 					if (tex)
-						shadedMaterial.color = SampleTextureRGB(*tex, hitUV);
+						shadedMaterial.color = SampleTextureRGB(*tex, hitUV, mipLevel);
 				}
 				if (shadedMaterial.roughnessTextureIndex >= 0)
 				{
 					const Texture *tex = scene.GetTexture(shadedMaterial.roughnessTextureIndex);
 					if (tex)
-						shadedMaterial.roughness = SampleTextureR(*tex, hitUV);
+						shadedMaterial.roughness = SampleTextureR(*tex, hitUV, mipLevel);
 				}
 				if (shadedMaterial.metallicTextureIndex >= 0)
 				{
 					const Texture *tex = scene.GetTexture(shadedMaterial.metallicTextureIndex);
 					if (tex)
-						shadedMaterial.metallic = SampleTextureR(*tex, hitUV);
+						shadedMaterial.metallic = SampleTextureR(*tex, hitUV, mipLevel);
 				}
 				const Material &hitMaterial = shadedMaterial;
 
@@ -712,7 +753,8 @@ namespace Mirage
 							Vec3 sample = PathTrace(*scene, origin, dir, time, options.maxDepth, rand,
 													 wantAovs ? &hitDepth : nullptr,
 													 wantAovs ? &hitNormal : nullptr,
-													 wantAovs ? &hitPrim : nullptr);
+													 wantAovs ? &hitPrim : nullptr,
+													 camera.EffectiveFov(), options.height);
 
 							AddSample(output, options.width, options.height, x, y, options.clamp, options.filter, sample);
 
