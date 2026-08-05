@@ -52,30 +52,82 @@ float Material_GetIndexOfRefraction(GpuMaterial mat)
 // (see Probe.slang).
 uniform Sampler2D g_Textures[kMaxMaterialTextures];
 
+// Per-slot width/height/UDIM-grid metadata (Tier-2 "mipmapping"/"UDIM"),
+// parallel to g_Textures[] above and indexed the same way - mirrors
+// GpuLayout.h's GpuTextureInfo. Defined here (not scene/SceneBuffers.slang,
+// which already `import Material` for GpuMaterial) to avoid a circular
+// import.
+struct GpuTextureInfo
+{
+    int width;
+    int height;
+    int udimGridWidth;
+    int udimGridHeight;
+};
+
+uniform StructuredBuffer<GpuTextureInfo> g_TextureInfo;
+
+// Mirrors TextureSampling.h's UdimAtlasUV exactly (see that function's
+// comment for the tile-placement/row-order convention) - a no-op for an
+// ordinary single-tile texture (udimGridWidth == udimGridHeight == 1),
+// otherwise remaps uv's integer part (tile index) and fractional part
+// (local UV) into the composited atlas texture's own [0,1] space. See
+// SceneRenderer.cpp's LoadUdimAtlas for how the atlas itself is built.
+float2 UdimAtlasUV(GpuTextureInfo info, float2 uv)
+{
+    if (info.udimGridWidth <= 1 && info.udimGridHeight <= 1)
+        return uv;
+
+    float tileU = floor(uv.x);
+    float tileV = floor(uv.y);
+    float localU = uv.x - tileU;
+    float localV = uv.y - tileV;
+
+    float clampedU = clamp(tileU, 0.0f, float(info.udimGridWidth - 1));
+    float clampedV = clamp(tileV, 0.0f, float(info.udimGridHeight - 1));
+
+    return float2((clampedU + localU) / float(info.udimGridWidth),
+                  (clampedV + localV) / float(info.udimGridHeight));
+}
+
 // Mirrors TextureSampling.h's SampleTextureRGB/SampleTextureR - hardware
 // bilinear+wrap sampling via Sampler2D.SampleLevel, deliberately matched by
 // the CPU's hand-rolled bilinear sampler (not the probe's historical nearest-
 // texel CPU convention) so kernel_validate can hold this to a tight bar.
 // Falls back to the material's scalar/color field when no texture is bound.
-float3 Material_SampleAlbedo(GpuMaterial mat, float2 uv)
+// mipLevel is a required parameter (not defaulted - this codebase's Slang
+// files have no default-parameter precedent, matching the explicit-argument
+// convention every other threaded value here uses, e.g. numScenePrims/
+// numLights) - callers with no mip heuristic available (e.g.
+// TextureSampleTestMain.slang's isolated function tests) pass 0.0f
+// explicitly, same as the CPU-side default. .SampleLevel() itself does
+// hardware trilinear filtering between adjacent integer levels when the
+// bound texture has mips (see VulkanRenderer::UploadMaterialTextures),
+// unlike the CPU's hand-rolled SampleTrilinear which blends two bilinear
+// samples explicitly - same numerical intent, different mechanism, since the
+// GPU gets this for free from the sampler hardware.
+float3 Material_SampleAlbedo(GpuMaterial mat, float2 uv, float mipLevel)
 {
     if (mat.albedoTextureIndex < 0)
         return mat.color;
-    return g_Textures[mat.albedoTextureIndex].SampleLevel(uv, 0.0f).rgb;
+    float2 remappedUV = UdimAtlasUV(g_TextureInfo[mat.albedoTextureIndex], uv);
+    return g_Textures[mat.albedoTextureIndex].SampleLevel(remappedUV, mipLevel).rgb;
 }
 
-float Material_SampleRoughness(GpuMaterial mat, float2 uv)
+float Material_SampleRoughness(GpuMaterial mat, float2 uv, float mipLevel)
 {
     if (mat.roughnessTextureIndex < 0)
         return mat.roughness;
-    return g_Textures[mat.roughnessTextureIndex].SampleLevel(uv, 0.0f).r;
+    float2 remappedUV = UdimAtlasUV(g_TextureInfo[mat.roughnessTextureIndex], uv);
+    return g_Textures[mat.roughnessTextureIndex].SampleLevel(remappedUV, mipLevel).r;
 }
 
-float Material_SampleMetallic(GpuMaterial mat, float2 uv)
+float Material_SampleMetallic(GpuMaterial mat, float2 uv, float mipLevel)
 {
     if (mat.metallicTextureIndex < 0)
         return mat.metallic;
-    return g_Textures[mat.metallicTextureIndex].SampleLevel(uv, 0.0f).r;
+    float2 remappedUV = UdimAtlasUV(g_TextureInfo[mat.metallicTextureIndex], uv);
+    return g_Textures[mat.metallicTextureIndex].SampleLevel(remappedUV, mipLevel).r;
 }
 
 // Mirrors TextureSampling.h's SampleTextureAlpha - used for opacity/cutout
@@ -87,7 +139,8 @@ float Material_SampleOpacity(GpuMaterial mat, float2 uv)
 {
     if (mat.opacityTextureIndex < 0)
         return mat.opacity;
-    return g_Textures[mat.opacityTextureIndex].SampleLevel(uv, 0.0f).a;
+    float2 remappedUV = UdimAtlasUV(g_TextureInfo[mat.opacityTextureIndex], uv);
+    return g_Textures[mat.opacityTextureIndex].SampleLevel(remappedUV, 0.0f).a;
 }
 
 // Raw [0,1] RGB texel from the bound normal-map texture - the decode/TBN
@@ -98,5 +151,6 @@ float Material_SampleOpacity(GpuMaterial mat, float2 uv)
 // Material_SampleOpacity above.
 float3 Material_SampleNormal(GpuMaterial mat, float2 uv)
 {
-    return g_Textures[mat.normalTextureIndex].SampleLevel(uv, 0.0f).rgb;
+    float2 remappedUV = UdimAtlasUV(g_TextureInfo[mat.normalTextureIndex], uv);
+    return g_Textures[mat.normalTextureIndex].SampleLevel(remappedUV, 0.0f).rgb;
 }

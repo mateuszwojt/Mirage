@@ -86,6 +86,10 @@ namespace Mirage
     // utils/Util.h's CameraSampler constructor output) - avoids porting
     // quaternion camera math to the GPU. rasterToWorld is column-major,
     // matching math/Mat44.h's existing storage (cols[4][4]) byte-for-byte.
+    // fovY (Tier-2 "mipmapping") is Camera::EffectiveFov()'s resolved
+    // vertical FOV in radians - appended, not interleaved, purely so
+    // PathTrace.slang's mip-level heuristic can derive a pixel's angular
+    // size without re-deriving it from rasterToWorld.
     struct GpuCamera
     {
         float rasterToWorld[16];
@@ -94,8 +98,9 @@ namespace Mirage
         float focalPoint;
         uint32_t enableDOF;
         float shutterStart, shutterEnd;
+        float fovY;
     };
-    static_assert(sizeof(GpuCamera) == 64 + 12 + 4 + 4 + 4 + 8, "GpuCamera layout drifted");
+    static_assert(sizeof(GpuCamera) == 64 + 12 + 4 + 4 + 4 + 8 + 4, "GpuCamera layout drifted");
 
     // Per-dispatch uniform. sampleIndex/frameSeed drive PathTraceMain.slang's
     // per-pixel RNG seeding for progressive accumulation (see the plan's "Path
@@ -117,6 +122,22 @@ namespace Mirage
         uint32_t numLights;
     };
     static_assert(sizeof(GpuFrameParams) == 28 + 4, "GpuFrameParams layout drifted");
+
+    // Per-material-texture-slot metadata (Tier-2 "mipmapping"/"UDIM") -
+    // parallel to Material.slang's g_Textures[kMaxMaterialTextures], indexed
+    // the same way (by GpuMaterial's xxxTextureIndex fields). width/height
+    // let PathTrace.slang's mip-level heuristic convert a world-space
+    // texture footprint into a mip level; udimGridWidth/Height (1/1 = "not
+    // a UDIM atlas") let Material_Sample* remap uv into atlas space before
+    // sampling - see TextureSampling.h's UdimAtlasUV for the CPU mirror.
+    struct GpuTextureInfo
+    {
+        int32_t width;
+        int32_t height;
+        int32_t udimGridWidth;
+        int32_t udimGridHeight;
+    };
+    static_assert(sizeof(GpuTextureInfo) == 16, "GpuTextureInfo layout drifted");
 
     // Mirrors lights/PunctualLight.h's PunctualLight - point/directional
     // delta-distribution lights, deliberately not part of GpuPrimitive (see
@@ -216,11 +237,13 @@ namespace Mirage
     // CPU-vs-GPU comparison possible here - see the plan's note that
     // per-pixel-hashed RNG streams intentionally differ between the CPU and GPU
     // renderers and are not meant to match bit-for-bit.
-    //
-    // numLights (Tier-2 "punctual lights") appended, not interleaved -
-    // existing field offsets unchanged. Every existing test-case construction
-    // site value-initializes with `{}` before setting fields by name, so
-    // this defaults to 0 (no punctual lights) for every pre-existing test.
+    // numLights (Tier-2 "punctual lights") and cameraFovY/imageHeight
+    // (Tier-2 "mipmapping" - see PathTrace.slang's MipLevelFromHitDistance)
+    // appended, not interleaved - existing field offsets unchanged. Every
+    // existing test-case construction site value-initializes with `{}`
+    // before setting fields by name, so numLights/cameraFovY/imageHeight
+    // default to 0 (no punctual lights, mip heuristic disabled - always
+    // mip level 0) for every pre-existing test.
     struct GpuPathTraceTestCase
     {
         float originX, originY, originZ;
@@ -230,8 +253,10 @@ namespace Mirage
         uint32_t seed;
         uint32_t numPrimitives;
         uint32_t numLights;
+        float cameraFovY;
+        uint32_t imageHeight;
     };
-    static_assert(sizeof(GpuPathTraceTestCase) == 40 + 4, "GpuPathTraceTestCase layout drifted");
+    static_assert(sizeof(GpuPathTraceTestCase) == 40 + 4 + 8, "GpuPathTraceTestCase layout drifted");
 
     struct GpuPathTraceTestResult
     {
