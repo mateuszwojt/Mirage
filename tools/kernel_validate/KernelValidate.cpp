@@ -30,6 +30,7 @@
 #include "mirage/utils/Util.h"
 #include "mirage/shaders/Disney.h"
 #include "mirage/shaders/TextureSampling.h"
+#include "mirage/shaders/NormalMapping.h"
 #include "mirage/math/Geometric.h"
 #include "mirage/core/Probe.h"
 
@@ -1307,6 +1308,232 @@ namespace
         return pass;
     }
 
+    // M12 (Tier-1 "bump/normal mapping"): three checks.
+    //
+    // (1) Hand-verified CPU-only math check of ApplyNormalMap itself, no
+    // scene/texture/BVH involved - a flat (tangent-space "up") texel must
+    // return the normal unchanged; a texel encoding a known 3-4-5-triangle
+    // tilt, evaluated against a normal/tangent basis that exactly aligns
+    // with world axes, has an exactly hand-computable expected result; a
+    // texel that would flip the normal past 90 degrees from the
+    // unperturbed one must trigger the safety-net fallback.
+    //
+    // (2) Regression: a flat normal map must render float-identical to no
+    // normal map at all - a cheap, strong check that the decode+TBN
+    // round-trip's identity case really is a no-op, not just "close".
+    //
+    // (3) CPU/GPU parity on a real (non-flat) normal map, reusing the
+    // standard RunPathTraceValidation harness like every other scene-level
+    // check in this file - exercises the full pipeline (tangent
+    // computation/interpolation, Material_SampleNormal, ApplyNormalMap),
+    // not just the isolated math from (1).
+    namespace
+    {
+        bool CheckNormalMapping(const char *name, Vec3 got, Vec3 expected, float tol, bool &pass)
+        {
+            float d = Length(got - expected);
+            bool ok = d < tol;
+            printf("[M12 NormalMapping] %s: expected (%.4f,%.4f,%.4f) got (%.4f,%.4f,%.4f) %s\n",
+                   name, expected.x, expected.y, expected.z, got.x, got.y, got.z, ok ? "OK" : "MISMATCH");
+            pass = pass && ok;
+            return ok;
+        }
+
+        bool RunNormalMappingMathValidation()
+        {
+            bool pass = true;
+
+            Vec3 normal(0.0f, 0.0f, 1.0f);
+            Vec3 tangent(1.0f, 0.0f, 0.0f);
+
+            // Flat/resting texel (0.5,0.5,1.0) -> decodes to (0,0,1) -> no
+            // perturbation.
+            CheckNormalMapping("flat texel", ApplyNormalMap(normal, tangent, Vec3(0.5f, 0.5f, 1.0f)), normal, 1.e-5f, pass);
+
+            // Texel (0.8,0.5,0.9) decodes to tangent-space (0.6,0,0.8) (a
+            // unit 3-4-5-triangle vector) - with tangent=+X, normal=+Z
+            // (bitangent = cross(normal,tangent) = +Y), the perturbed
+            // world-space normal is exactly (0.6,0,0.8).
+            CheckNormalMapping("tilted texel", ApplyNormalMap(normal, tangent, Vec3(0.8f, 0.5f, 0.9f)), Vec3(0.6f, 0.0f, 0.8f), 1.e-5f, pass);
+
+            // Texel (1.0,0.5,0.0) decodes to tangent-space (1,0,-1) - the
+            // resulting perturbed normal would face away from the
+            // unperturbed one (Dot < 0); the safety net must fall back to
+            // `normal` unchanged rather than returning a backward-facing
+            // normal.
+            CheckNormalMapping("flip safety net", ApplyNormalMap(normal, tangent, Vec3(1.0f, 0.5f, 0.0f)), normal, 1.e-5f, pass);
+
+            printf("[M12 NormalMapping] math %s\n", pass ? "PASS" : "FAIL");
+            return pass;
+        }
+
+        Texture MakeFlatNormalMapTexture()
+        {
+            Texture tex;
+            tex.width = 2;
+            tex.height = 2;
+            tex.depth = 1;
+            tex.data = new float[2 * 2 * 4];
+            for (int i = 0; i < 4; ++i)
+            {
+                tex.data[i * 4 + 0] = 0.5f;
+                tex.data[i * 4 + 1] = 0.5f;
+                tex.data[i * 4 + 2] = 1.0f;
+                tex.data[i * 4 + 3] = 1.0f;
+            }
+            return tex;
+        }
+
+        // Constant tangent-space tilt toward +tangent, decoded value
+        // (0.6,0.0,0.8) - same 3-4-5-triangle encoding as the math check
+        // above, chosen so a raking light visibly changes the shading of a
+        // normal-mapped quad relative to the flat case.
+        Texture MakeTiltedNormalMapTexture()
+        {
+            Texture tex;
+            tex.width = 2;
+            tex.height = 2;
+            tex.depth = 1;
+            tex.data = new float[2 * 2 * 4];
+            for (int i = 0; i < 4; ++i)
+            {
+                tex.data[i * 4 + 0] = 0.8f; // decodes to 0.6
+                tex.data[i * 4 + 1] = 0.5f; // decodes to 0.0
+                tex.data[i * 4 + 2] = 0.9f; // decodes to 0.8
+                tex.data[i * 4 + 3] = 1.0f;
+            }
+            return tex;
+        }
+
+        // Same quad shape/UVs as BuildTexturedPathTraceTestScene's mesh, but
+        // also computes tangents - required for any normal-map test, since
+        // PrimitiveIntersect only populates outTangent when
+        // Mesh::HasTangents().
+        std::unique_ptr<Mesh> MakeTexturedTangentQuadMesh()
+        {
+            auto mesh = std::make_unique<Mesh>();
+            mesh->vertices = {
+                Vec3(-0.7f, -0.7f, 0.0f),
+                Vec3(0.7f, -0.7f, 0.0f),
+                Vec3(0.7f, 0.7f, 0.0f),
+                Vec3(-0.7f, 0.7f, 0.0f),
+            };
+            mesh->uvs = {Vec2(0.0f, 0.0f), Vec2(1.0f, 0.0f), Vec2(1.0f, 1.0f), Vec2(0.0f, 1.0f)};
+            mesh->indices = {0, 1, 2, 0, 2, 3};
+            mesh->CalculateNormals();
+            mesh->ComputeTangents();
+            mesh->rebuildBVH();
+            return mesh;
+        }
+
+        // mode: 0 = no normal map, 1 = flat normal map, 2 = tilted normal map.
+        void BuildNormalMapTestScene(Scene &scene, int mode)
+        {
+            Primitive spherePrim;
+            spherePrim.type = eSphere;
+            spherePrim.sphere.radius = 1.0f;
+            spherePrim.startTransform = Transform(Vec3(0.0f, 0.0f, 0.0f));
+            spherePrim.endTransform = spherePrim.startTransform;
+            {
+                auto sphereMat = std::make_unique<Material>();
+                sphereMat->color = Vec3(0.7f, 0.3f, 0.3f);
+                sphereMat->roughness = 0.4f;
+                spherePrim.materialIndex = scene.AddMaterial(std::move(sphereMat));
+            }
+            scene.AddPrimitive(spherePrim);
+
+            std::unique_ptr<Mesh> mesh = MakeTexturedTangentQuadMesh();
+
+            Primitive meshPrim;
+            meshPrim.type = eMesh;
+            meshPrim.startTransform = Transform(Vec3(2.3f, 0.0f, 0.0f));
+            meshPrim.endTransform = meshPrim.startTransform;
+            meshPrim.mesh = GeometryFromMesh(mesh.get());
+            {
+                auto meshMat = std::make_unique<Material>();
+                meshMat->color = Vec3(0.6f, 0.6f, 0.6f);
+                meshMat->roughness = 0.5f;
+                if (mode != 0)
+                {
+                    Texture tex = (mode == 1) ? MakeFlatNormalMapTexture() : MakeTiltedNormalMapTexture();
+                    auto texPtr = std::make_unique<Texture>(std::move(tex));
+                    int texIndex = scene.AddTexture(std::move(texPtr));
+                    meshMat->normalTextureIndex = texIndex;
+                }
+                meshPrim.materialIndex = scene.AddMaterial(std::move(meshMat));
+            }
+            meshPrim.mesh.meshIndex = scene.AddMesh(std::move(mesh));
+            scene.AddPrimitive(meshPrim);
+
+            Primitive lightPrim;
+            lightPrim.type = eSphere;
+            lightPrim.sphere.radius = 0.5f;
+            lightPrim.startTransform = Transform(Vec3(0.5f, 3.0f, 2.0f));
+            lightPrim.endTransform = lightPrim.startTransform;
+            {
+                auto lightMat = std::make_unique<Material>();
+                lightMat->emission = Vec3(8.0f, 8.0f, 7.0f);
+                lightPrim.materialIndex = scene.AddMaterial(std::move(lightMat));
+            }
+            lightPrim.lightSamples = 2;
+            scene.AddPrimitive(lightPrim);
+
+            scene.sky.horizon = Vec3(0.6f, 0.7f, 0.9f);
+            scene.sky.zenith = Vec3(0.1f, 0.2f, 0.5f);
+
+            scene.Build();
+        }
+    }
+
+    bool RunNormalMappingValidation()
+    {
+        bool pass = RunNormalMappingMathValidation();
+
+        // Regression: flat normal map vs no normal map at all, same fixed
+        // ray (aimed at the mesh, positioned at x=2.3 per
+        // BuildTexturedPathTraceTestScene's precedent) and same per-sample
+        // seed across both scenes - only the RNG-driven shading path
+        // (BSDF/light sampling) varies sample to sample, so any deviation
+        // between the two scenes traces back to the normal-map decode
+        // itself, not sampling noise.
+        {
+            Scene baseline, flat;
+            BuildNormalMapTestScene(baseline, 0);
+            BuildNormalMapTestScene(flat, 1);
+
+            const Vec3 origin(0.0f, 0.0f, 6.0f);
+            const Vec3 meshCenter(2.3f, 0.0f, 0.0f);
+            const Vec3 dir = Normalize(meshCenter - origin);
+
+            const int kSampleCount = 16;
+            double sumSq = 0.0;
+            int bad = 0;
+            for (int i = 0; i < kSampleCount; ++i)
+            {
+                uint32_t seed = (uint32_t)(i * 2246822519u + 1u);
+
+                Random randA(seed);
+                Vec3 a = PathTrace(baseline, origin, dir, 1.0f, 3, randA);
+                Random randB(seed);
+                Vec3 b = PathTrace(flat, origin, dir, 1.0f, 3, randB);
+
+                float d = Length(a - b);
+                sumSq += (double)d * d;
+                if (d > 1.e-4f)
+                    ++bad;
+            }
+            printf("[M12 NormalMapping] flat-map regression RMSE=%f bad=%d/%d\n", sqrt(sumSq / kSampleCount), bad, kSampleCount);
+            pass = pass && (bad == 0);
+        }
+
+        bool renderPass = RunPathTraceValidation(
+            [](Scene &s) { BuildNormalMapTestScene(s, 2); }, 1.e-2f, "normal-mapped");
+        pass = pass && renderPass;
+
+        printf("[M12 NormalMapping] %s\n", pass ? "PASS" : "FAIL");
+        return pass;
+    }
+
     // M7 validation-only: CPU-only (no GPU/Vulkan involved - that's M8's job)
     // checks for TextureSampling.h's SampleTextureRGB/SampleTextureR against
     // hand-computed bilinear expected values, plus a textured-mesh render
@@ -1854,10 +2081,11 @@ int main()
     bool motionBlurPass = RunMotionBlurValidation();
     bool instancingPass = RunInstancingValidation();
     bool opacityPass = RunOpacityValidation();
+    bool normalMappingPass = RunNormalMappingValidation();
 
     bool pass = normalsPass && bsdfPass && pathTracePass && pathTraceProbePass && probePass &&
                 textureArraySpikePass && textureSamplingPass && pathTraceTexturedPass && motionBlurPass &&
-                instancingPass && opacityPass;
+                instancingPass && opacityPass && normalMappingPass;
     printf("%s\n", pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;
 }

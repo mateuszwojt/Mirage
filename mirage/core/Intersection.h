@@ -937,8 +937,10 @@ namespace Mirage
 	// unmodified default (typically Vec2(0,0), the caller's initial value) as
 	// "no UV available for this hit", not a real coordinate. Sphere/plane hits
 	// never populate outUV (see the plan's Deferrals - no procedural UV for
-	// non-mesh primitives in this milestone).
-	CUDA_CALLABLE inline bool PrimitiveIntersect(const Primitive &p, const Ray &ray, float &outT, ::Mirage::Vec3*outNormal, ::Mirage::Vec2 *outUV = nullptr)
+	// non-mesh primitives in this milestone). outTangent follows the exact
+	// same convention, gated on MeshGeometry::tangents != nullptr
+	// (Mesh::HasTangents()) instead of uvs.
+	CUDA_CALLABLE inline bool PrimitiveIntersect(const Primitive &p, const Ray &ray, float &outT, ::Mirage::Vec3*outNormal, ::Mirage::Vec2 *outUV = nullptr, ::Mirage::Vec3 *outTangent = nullptr)
 	{
 		Transform transform = InterpolateTransform(p.startTransform, p.endTransform, ray.time);
 
@@ -1015,6 +1017,18 @@ namespace Mirage
 					const ::Mirage::Vec2 uv1 = fetchVec2(p.mesh.uvs, i1);
 					const ::Mirage::Vec2 uv2 = fetchVec2(p.mesh.uvs, i2);
 					*outUV = u * uv0 + v * uv1 + w * uv2;
+				}
+
+				// Same u/v/w barycentric weights again, applied to
+				// per-vertex tangents - mirrors the outUV block immediately
+				// above exactly, gated on tangent data instead of UV data.
+				if (outTangent && p.mesh.tangents)
+				{
+					const ::Mirage::Vec3 t1 = fetchVec3(p.mesh.tangents, i0);
+					const ::Mirage::Vec3 t2 = fetchVec3(p.mesh.tangents, i1);
+					const ::Mirage::Vec3 t3 = fetchVec3(p.mesh.tangents, i2);
+					::Mirage::Vec3 smoothTangent = u * t1 + v * t2 + w * t3;
+					*outTangent = SafeNormalize(TransformVector(transform, smoothTangent));
 				}
 			}
 

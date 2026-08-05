@@ -120,11 +120,13 @@ public:
     void setRoughnessMapPath(const std::string &path) { roughnessMapPath = path; }
     void setMetallicMapPath(const std::string &path) { metallicMapPath = path; }
     void setOpacityMapPath(const std::string &path) { opacityMapPath = path; }
+    void setNormalMapPath(const std::string &path) { normalMapPath = path; }
 
     const std::string &getAlbedoMapPath() const { return albedoMapPath; }
     const std::string &getRoughnessMapPath() const { return roughnessMapPath; }
     const std::string &getMetallicMapPath() const { return metallicMapPath; }
     const std::string &getOpacityMapPath() const { return opacityMapPath; }
+    const std::string &getNormalMapPath() const { return normalMapPath; }
 
     // Texture loading/registration is deliberately not done here - it needs a
     // Scene& (for FindOrAddTexture's dedup) that this class doesn't have, and
@@ -169,6 +171,7 @@ private:
     std::string roughnessMapPath;
     std::string metallicMapPath;
     std::string opacityMapPath;
+    std::string normalMapPath;
 };
 
 // Primitive definition class
@@ -278,6 +281,10 @@ public:
             // Linear, not sRGB - opacityMap's alpha channel is a coverage
             // mask, not a color, same reasoning as roughness/metallic above.
             mat.opacityTextureIndex = resolveAndLoad(it->second.getOpacityMapPath(), TextureColorSpace::eLinear);
+            // Linear, not sRGB - a normal map's RGB channels encode a
+            // tangent-space direction, not a color, same reasoning as
+            // roughness/metallic/opacity above.
+            mat.normalTextureIndex = resolveAndLoad(it->second.getNormalMapPath(), TextureColorSpace::eLinear);
         }
         else {
             std::cout << "Debug: Material not found, using default" << std::endl;
@@ -527,6 +534,10 @@ private:
             else if (property == "opacityMap" && parts.size() >= 2) {
                 std::cout << "Debug: Setting opacityMap: " << parts[1] << std::endl;
                 materials[materialName].setOpacityMapPath(parts[1]);
+            }
+            else if (property == "normalMap" && parts.size() >= 2) {
+                std::cout << "Debug: Setting normalMap: " << parts[1] << std::endl;
+                materials[materialName].setNormalMapPath(parts[1]);
             }
         }
         catch (const std::exception& e) {

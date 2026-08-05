@@ -31,6 +31,7 @@ struct GpuMaterial
     int roughnessTextureIndex;
     int metallicTextureIndex;
     int opacityTextureIndex; // -1 = none, use `opacity` scalar as-is
+    int normalTextureIndex;  // -1 = none, no normal perturbation - see NormalMapping.slang
 };
 
 // Mirrors Material::GetIndexOfRefraction().
@@ -87,4 +88,15 @@ float Material_SampleOpacity(GpuMaterial mat, float2 uv)
     if (mat.opacityTextureIndex < 0)
         return mat.opacity;
     return g_Textures[mat.opacityTextureIndex].SampleLevel(uv, 0.0f).a;
+}
+
+// Raw [0,1] RGB texel from the bound normal-map texture - the decode/TBN
+// transform live in NormalMapping.slang's ApplyNormalMap, not here, mirroring
+// how the CPU side keeps SampleTextureRGB (texture sampling) and
+// ApplyNormalMap (the math) in separate files. Only ever called after
+// already checking normalTextureIndex >= 0, same convention as
+// Material_SampleOpacity above.
+float3 Material_SampleNormal(GpuMaterial mat, float2 uv)
+{
+    return g_Textures[mat.normalTextureIndex].SampleLevel(uv, 0.0f).rgb;
 }

@@ -14,6 +14,7 @@ import Trace;
 import SampleLights;
 import Sky;
 import Probe;
+import NormalMapping;
 
 static const float kIntegratorBsdfSamples = 1.0f;
 static const float kIntegratorProbeSamples = 1.0f;
@@ -46,8 +47,9 @@ float3 PathTrace(float3 startOrigin, float3 startDir, float time, int maxDepth, 
         float3 n;
         int hitPrimIndex;
         float2 hitUV;
+        float3 hitTangent;
 
-        if (TraceWithCutout(rayOrigin, rayDir, rayTime, numScenePrims, rand, t, n, hitPrimIndex, hitUV))
+        if (TraceWithCutout(rayOrigin, rayDir, rayTime, numScenePrims, rand, t, n, hitPrimIndex, hitUV, hitTangent))
         {
             GpuPrimitive hitPrim = g_Primitives[hitPrimIndex];
             GpuMaterial hitMaterial = g_Materials[hitPrim.materialIndex];
@@ -62,6 +64,14 @@ float3 PathTrace(float3 startOrigin, float3 startDir, float time, int maxDepth, 
                 hitMaterial.roughness = Material_SampleRoughness(hitMaterial, hitUV);
             if (hitMaterial.metallicTextureIndex >= 0)
                 hitMaterial.metallic = Material_SampleMetallic(hitMaterial, hitUV);
+
+            // Perturb the shading normal in place - every subsequent use of
+            // `n` this iteration (AOV capture, SampleLights, BSDFSample/
+            // BSDFEval) sees the bump-mapped normal. Only fires for eMesh
+            // hits with both a bound normal map and tangent data (hitTangent
+            // is only ever populated in that case).
+            if (hitMaterial.normalTextureIndex >= 0)
+                n = ApplyNormalMap(n, hitTangent, Material_SampleNormal(hitMaterial, hitUV));
 
             float outEta;
             float3 outAbsorption;

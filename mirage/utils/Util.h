@@ -19,6 +19,7 @@ namespace Mirage
             geo.nodes = nullptr;
             geo.cdf = nullptr;
             geo.positionsEnd = nullptr;
+            geo.tangents = nullptr;
             geo.numNodes = 0;
             geo.numIndices = 0;
             geo.numVertices = 0;
@@ -35,6 +36,7 @@ namespace Mirage
         geo.nodes = (mesh->bvh.numNodes > 0 && mesh->bvh.nodes) ? &mesh->bvh.nodes[0] : nullptr;
         geo.cdf = mesh->cdf.empty() ? nullptr : &mesh->cdf[0];
         geo.positionsEnd = mesh->HasMotion() ? &mesh->verticesEnd[0] : nullptr;
+        geo.tangents = mesh->HasTangents() ? &mesh->tangents[0] : nullptr;
         geo.area = mesh->area;
 
         geo.numNodes = mesh->bvh.numNodes;
