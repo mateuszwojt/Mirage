@@ -36,7 +36,18 @@ ELSEIF(WIN32)
 ENDIF()
 SET(CMAKE_INSTALL_DIR "${_CMAKE_INSTALL_DIR}" CACHE PATH "The directory cmake files are installed in")
 
+option(MIRAGE_BUILD_TESTS "Build Mirage's unit/regression test suites (tests/) and register kernel_validate with CTest" ON)
+
+# Must precede add_subdirectory(tools) so tools/kernel_validate's add_test()
+# call is actually picked up by `ctest` - CMake only generates CTest
+# machinery for directories processed after enable_testing() runs.
+enable_testing()
+
 add_subdirectory(mirage)
 add_subdirectory(tools)
+
+if(MIRAGE_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()
 
 EXPORT( PACKAGE ${PROJECT_NAME} )

@@ -1,4 +1,3 @@
-#include <iostream>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -14,6 +13,8 @@
 #include "mirage/prims/Primitive.h"
 #include "mirage/shaders/Material.h"
 #include "mirage/shaders/TextureLoader.h"
+#include "mirage/utils/CrashHandler.h"
+#include "mirage/utils/Log.h"
 #include "mirage/utils/MathUtils.h"
 #include "mirage/utils/Util.h"
 #include "mirage/camera/Camera.h"
@@ -68,9 +69,9 @@ std::vector<std::string> split(const std::string &s, char delimiter)
         }
     }
 
-    std::cout << "Debug: Split '" << s << "' into " << tokens.size() << " tokens" << std::endl;
+    MIRAGE_LOG_DEBUG("Debug: Split '{}' into {} tokens", s, tokens.size());
     for (size_t i = 0; i < tokens.size(); ++i) {
-        std::cout << "Debug: Token " << i << ": '" << tokens[i] << "'" << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Token {}: '{}'", i, tokens[i]);
     }
 
     return tokens;
@@ -140,8 +141,7 @@ std::unique_ptr<Texture> LoadUdimAtlas(const std::string &patternPath, TextureCo
         int v = (udim - 1001) / 10;
         if (u < 0 || v < 0)
         {
-            std::cerr << "LoadUdimAtlas: skipping tile with out-of-range UDIM number " << udim
-                       << " (" << name << ")" << std::endl;
+            MIRAGE_LOG_ERROR("LoadUdimAtlas: skipping tile with out-of-range UDIM number {} ({})", udim, name);
             continue;
         }
 
@@ -159,7 +159,7 @@ std::unique_ptr<Texture> LoadUdimAtlas(const std::string &patternPath, TextureCo
 
     if (tiles.empty())
     {
-        std::cerr << "LoadUdimAtlas: no tiles found matching pattern '" << patternPath << "'" << std::endl;
+        MIRAGE_LOG_ERROR("LoadUdimAtlas: no tiles found matching pattern '{}'", patternPath);
         return nullptr;
     }
 
@@ -172,9 +172,7 @@ std::unique_ptr<Texture> LoadUdimAtlas(const std::string &patternPath, TextureCo
         gridH = std::max(gridH, t.v + 1);
         if (t.tex->width != tileW || t.tex->height != tileH)
         {
-            std::cerr << "LoadUdimAtlas: tile resolution mismatch (expected " << tileW << "x" << tileH
-                       << ", got " << t.tex->width << "x" << t.tex->height << ") - rejecting UDIM set '"
-                       << patternPath << "'" << std::endl;
+            MIRAGE_LOG_ERROR("LoadUdimAtlas: tile resolution mismatch (expected {}x{}, got {}x{}) - rejecting UDIM set '{}'", tileW, tileH, t.tex->width, t.tex->height, patternPath);
             return nullptr;
         }
     }
@@ -266,27 +264,27 @@ public:
     // that resolution and sets Material::xxxTextureIndex after calling this.
     Material toMaterial() const
     {
-        std::cout << "Debug: Converting to Material" << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Converting to Material");
         Material mat;
 
         // Set material properties
         mat.color = color;
-        std::cout << "Debug: Setting color: (" << mat.color.x << ", " << mat.color.y << ", " << mat.color.z << ")" << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Setting color: ({}, {}, {})", mat.color.x, mat.color.y, mat.color.z);
 
         mat.roughness = roughness;
-        std::cout << "Debug: Setting roughness: " << mat.roughness << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Setting roughness: {}", mat.roughness);
 
         mat.metallic = metallic;
-        std::cout << "Debug: Setting metallic: " << mat.metallic << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Setting metallic: {}", mat.metallic);
 
         mat.specular = specular;
-        std::cout << "Debug: Setting specular: " << mat.specular << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Setting specular: {}", mat.specular);
 
         mat.emission = emission;
-        std::cout << "Debug: Setting emission: (" << mat.emission.x << ", " << mat.emission.y << ", " << mat.emission.z << ")" << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Setting emission: ({}, {}, {})", mat.emission.x, mat.emission.y, mat.emission.z);
 
         mat.opacity = opacity;
-        std::cout << "Debug: Setting opacity: " << mat.opacity << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Setting opacity: {}", mat.opacity);
 
         return mat;
     }
@@ -420,13 +418,12 @@ public:
     {
         if (type == "preetham")
         {
-            std::cout << "Debug: Baking Preetham sky (turbidity=" << turbidity << ", resolution="
-                       << resWidth << "x" << resHeight << ")" << std::endl;
+            MIRAGE_LOG_DEBUG("Debug: Baking Preetham sky (turbidity={}, resolution={}x{})", turbidity, resWidth, resHeight);
             scene.sky.probe = BakePreethamSky(sunDirection, turbidity, resWidth, resHeight);
         }
         else
         {
-            std::cout << "Debug: Setting gradient sky" << std::endl;
+            MIRAGE_LOG_DEBUG("Debug: Setting gradient sky");
             scene.sky.horizon = horizon;
             scene.sky.zenith = zenith;
         }
@@ -499,12 +496,12 @@ public:
 
     Primitive toPrimitive(const std::map<std::string, MaterialDefinition> &materials, Scene &scene, const std::string &baseDir) const
     {
-        std::cout << "Debug: Creating primitive of type: " << type << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Creating primitive of type: {}", type);
 
         Primitive prim;
 
         // Set transform
-        std::cout << "Debug: Setting transform: position(" << position.x << ", " << position.y << ", " << position.z << ")" << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Setting transform: position({}, {}, {})", position.x, position.y, position.z);
         prim.startTransform.p = position;
         prim.startTransform.r = rotation;
         prim.startTransform.s = scale;
@@ -513,12 +510,12 @@ public:
 
         // Set type and geometry
         if (type == "sphere") {
-            std::cout << "Debug: Setting sphere with radius: " << radius << std::endl;
+            MIRAGE_LOG_DEBUG("Debug: Setting sphere with radius: {}", radius);
             prim.type = Type::eSphere;
             prim.sphere.radius = radius;
         }
         else if (type == "plane") {
-            std::cout << "Debug: Setting plane with normal: (" << plane[0] << ", " << plane[1] << ", " << plane[2] << ", " << plane[3] << ")" << std::endl;
+            MIRAGE_LOG_DEBUG("Debug: Setting plane with normal: ({}, {}, {}, {})", plane[0], plane[1], plane[2], plane[3]);
             prim.type = Type::ePlane;
             prim.plane.plane[0] = plane[0];
             prim.plane.plane[1] = plane[1];
@@ -526,24 +523,24 @@ public:
             prim.plane.plane[3] = plane[3];
         }
         else if (type == "rect") {
-            std::cout << "Debug: Setting rect with width/height: " << width << ", " << height << std::endl;
+            MIRAGE_LOG_DEBUG("Debug: Setting rect with width/height: {}, {}", width, height);
             prim.type = Type::eRect;
             prim.rect.width = width;
             prim.rect.height = height;
         }
         else if (type == "disk") {
-            std::cout << "Debug: Setting disk with radius: " << radius << std::endl;
+            MIRAGE_LOG_DEBUG("Debug: Setting disk with radius: {}", radius);
             prim.type = Type::eDisk;
             prim.disk.radius = radius;
         }
 
         // Set material
-        std::cout << "Debug: Setting material: " << materialName << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Setting material: {}", materialName);
         Material mat;
         auto it = materials.find(materialName);
         if (it != materials.end()) {
             mat = it->second.toMaterial();
-            std::cout << "Debug: Material found and set" << std::endl;
+            MIRAGE_LOG_DEBUG("Debug: Material found and set");
 
             // Resolve + load texture maps, relative to the .tin file's own
             // directory (not the process CWD). A missing/broken texture file
@@ -585,7 +582,7 @@ public:
             mat.normalTextureIndex = resolveAndLoad(it->second.getNormalMapPath(), TextureColorSpace::eLinear);
         }
         else {
-            std::cout << "Debug: Material not found, using default" << std::endl;
+            MIRAGE_LOG_DEBUG("Debug: Material not found, using default");
         }
         // FindOrAddMaterial dedups by name, so every primitive referencing the
         // same material block shares one Scene::materials entry rather than
@@ -596,7 +593,7 @@ public:
         if (mat.emission.x > 0 ||
             mat.emission.y > 0 ||
             mat.emission.z > 0) {
-            std::cout << "Debug: Setting as light with samples: 1" << std::endl;
+            MIRAGE_LOG_DEBUG("Debug: Setting as light with samples: 1");
             prim.lightSamples = 1;
         }
 
@@ -628,13 +625,13 @@ public:
     bool parse(const std::string& filename) {
         std::ifstream file(filename);
         if (!file.is_open()) {
-            std::cerr << "Failed to open file: " << filename << std::endl;
+            MIRAGE_LOG_ERROR("Failed to open file: {}", filename);
             return false;
         }
 
         baseDir = std::filesystem::path(filename).parent_path().string();
 
-        std::cout << "Debug: File opened successfully: " << filename << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: File opened successfully: {}", filename);
 
         std::string line;
         std::string currentSection;
@@ -655,14 +652,14 @@ public:
                 continue;
             }
 
-            std::cout << "Debug: Processing line: " << line << std::endl;
+            MIRAGE_LOG_DEBUG("Debug: Processing line: {}", line);
 
             // Check if we're waiting for a block start
             if (waitingForBlockStart) {
                 if (line == "{") {
                     waitingForBlockStart = false;
                     inBlock = true;
-                    std::cout << "Debug: Block start found" << std::endl;
+                    MIRAGE_LOG_DEBUG("Debug: Block start found");
                     continue;
                 }
             }
@@ -671,7 +668,7 @@ public:
             if (line == "{") {
                 // Block start
                 inBlock = true;
-                std::cout << "Debug: Block start found" << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Block start found");
             } 
             else if (line == "}") {
                 // Block end
@@ -679,7 +676,7 @@ public:
                 
                 if (currentSection == "primitive") {
                     // Add the completed primitive to the list
-                    std::cout << "Debug: Adding primitive to list, type: " << currentPrimitive.getType() << std::endl;
+                    MIRAGE_LOG_DEBUG("Debug: Adding primitive to list, type: {}", currentPrimitive.getType());
                     primitives.push_back(currentPrimitive);
                     currentPrimitive = PrimitiveDefinition();
                 }
@@ -687,13 +684,13 @@ public:
                     // A scene has at most one camera - a second `camera { }`
                     // block silently overwrites the first, same "last one
                     // wins" behavior as re-declaring an existing material.
-                    std::cout << "Debug: Setting scene camera" << std::endl;
+                    MIRAGE_LOG_DEBUG("Debug: Setting scene camera");
                     camera = currentCamera;
                     hasCamera = true;
                     currentCamera = CameraDefinition();
                 }
                 else if (currentSection == "light") {
-                    std::cout << "Debug: Adding light to list" << std::endl;
+                    MIRAGE_LOG_DEBUG("Debug: Adding light to list");
                     lights.push_back(currentLight);
                     currentLight = LightDefinition();
                 }
@@ -701,7 +698,7 @@ public:
                     // A scene has at most one sky - a second `sky { }` block
                     // silently overwrites the first, same "last one wins"
                     // behavior as camera.
-                    std::cout << "Debug: Setting scene sky" << std::endl;
+                    MIRAGE_LOG_DEBUG("Debug: Setting scene sky");
                     sky = currentSky;
                     hasSky = true;
                     currentSky = SkyDefinition();
@@ -716,7 +713,7 @@ public:
                     if (parts[0] == "material" && parts.size() >= 2) {
                         currentSection = "material";
                         currentMaterial = parts[1];
-                        std::cout << "Debug: Starting material section: " << currentMaterial << std::endl;
+                        MIRAGE_LOG_DEBUG("Debug: Starting material section: {}", currentMaterial);
                         
                         // Initialize material with defaults
                         materials[currentMaterial] = MaterialDefinition();
@@ -724,7 +721,7 @@ public:
                     } 
                     else if (parts[0] == "primitive") {
                         currentSection = "primitive";
-                        std::cout << "Debug: Starting primitive section" << std::endl;
+                        MIRAGE_LOG_DEBUG("Debug: Starting primitive section");
 
                         // Initialize new primitive
                         currentPrimitive = PrimitiveDefinition();
@@ -732,21 +729,21 @@ public:
                     }
                     else if (parts[0] == "camera") {
                         currentSection = "camera";
-                        std::cout << "Debug: Starting camera section" << std::endl;
+                        MIRAGE_LOG_DEBUG("Debug: Starting camera section");
 
                         currentCamera = CameraDefinition();
                         waitingForBlockStart = true;
                     }
                     else if (parts[0] == "light") {
                         currentSection = "light";
-                        std::cout << "Debug: Starting light section" << std::endl;
+                        MIRAGE_LOG_DEBUG("Debug: Starting light section");
 
                         currentLight = LightDefinition();
                         waitingForBlockStart = true;
                     }
                     else if (parts[0] == "sky") {
                         currentSection = "sky";
-                        std::cout << "Debug: Starting sky section" << std::endl;
+                        MIRAGE_LOG_DEBUG("Debug: Starting sky section");
 
                         currentSky = SkyDefinition();
                         waitingForBlockStart = true;
@@ -777,26 +774,26 @@ public:
         
         // If we're still in a block at the end of the file, handle it
         if (inBlock && currentSection == "primitive") {
-            std::cout << "Debug: Adding final primitive to list" << std::endl;
+            MIRAGE_LOG_DEBUG("Debug: Adding final primitive to list");
             primitives.push_back(currentPrimitive);
         }
         else if (inBlock && currentSection == "camera") {
-            std::cout << "Debug: Setting final scene camera" << std::endl;
+            MIRAGE_LOG_DEBUG("Debug: Setting final scene camera");
             camera = currentCamera;
             hasCamera = true;
         }
         else if (inBlock && currentSection == "light") {
-            std::cout << "Debug: Adding final light to list" << std::endl;
+            MIRAGE_LOG_DEBUG("Debug: Adding final light to list");
             lights.push_back(currentLight);
         }
         else if (inBlock && currentSection == "sky") {
-            std::cout << "Debug: Setting final scene sky" << std::endl;
+            MIRAGE_LOG_DEBUG("Debug: Setting final scene sky");
             sky = currentSky;
             hasSky = true;
         }
 
 
-        std::cout << "Debug: Parsing complete. Found " << materials.size() << " materials and " << primitives.size() << " primitives" << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Parsing complete. Found {} materials and {} primitives", materials.size(), primitives.size());
         
         return true;
     }
@@ -804,31 +801,31 @@ public:
     void setupScene(Scene &scene)
     {
         // Clear existing scene
-        std::cout << "Debug: Clearing existing scene" << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Clearing existing scene");
         scene.Clear();
 
         // Add primitives
-        std::cout << "Debug: Adding " << primitives.size() << " primitives to scene" << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Adding {} primitives to scene", primitives.size());
         for (const auto &primDef : primitives)
         {
             try
             {
                 Primitive prim = primDef.toPrimitive(materials, scene, baseDir);
-                std::cout << "Debug: Adding primitive of type " << primDef.getType() << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Adding primitive of type {}", primDef.getType());
                 scene.AddPrimitive(prim);
             }
             catch (const std::exception &e)
             {
-                std::cerr << "Exception while adding primitive: " << e.what() << std::endl;
+                MIRAGE_LOG_ERROR("Exception while adding primitive: {}", e.what());
             }
             catch (...)
             {
-                std::cerr << "Unknown exception while adding primitive" << std::endl;
+                MIRAGE_LOG_ERROR("Unknown exception while adding primitive");
             }
         }
 
         // Add punctual (point/directional) lights.
-        std::cout << "Debug: Adding " << lights.size() << " lights to scene" << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Adding {} lights to scene", lights.size());
         for (const auto &lightDef : lights)
         {
             scene.lights.push_back(lightDef.toLight());
@@ -839,7 +836,7 @@ public:
         // simple all-zero gradient as before this feature existed).
         if (hasSky)
         {
-            std::cout << "Debug: Applying parsed sky to scene" << std::endl;
+            MIRAGE_LOG_DEBUG("Debug: Applying parsed sky to scene");
             sky.applyTo(scene);
         }
 
@@ -849,24 +846,24 @@ public:
         // block behave exactly as before this feature existed.
         if (hasCamera)
         {
-            std::cout << "Debug: Adding parsed camera to scene" << std::endl;
+            MIRAGE_LOG_DEBUG("Debug: Adding parsed camera to scene");
             scene.camera = std::make_unique<Camera>(camera.toCamera());
         }
 
         // Build the scene (BVH, etc.)
-        std::cout << "Debug: Building scene (BVH)" << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Building scene (BVH)");
         try
         {
             scene.Build();
-            std::cout << "Debug: Scene built successfully" << std::endl;
+            MIRAGE_LOG_DEBUG("Debug: Scene built successfully");
         }
         catch (const std::exception &e)
         {
-            std::cerr << "Exception while building scene: " << e.what() << std::endl;
+            MIRAGE_LOG_ERROR("Exception while building scene: {}", e.what());
         }
         catch (...)
         {
-            std::cerr << "Unknown exception while building scene" << std::endl;
+            MIRAGE_LOG_ERROR("Unknown exception while building scene");
         }
     }
 
@@ -876,69 +873,69 @@ private:
         if (parts.empty()) return;
 
         std::string property = parts[0];
-        std::cout << "Debug: Parsing material property: " << property << " for material: " << materialName << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Parsing material property: {} for material: {}", property, materialName);
 
         try {
             if (property == "color" && parts.size() >= 4) {
                 float r = std::stof(parts[1]);
                 float g = std::stof(parts[2]);
                 float b = std::stof(parts[3]);
-                std::cout << "Debug: Setting color: (" << r << ", " << g << ", " << b << ")" << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting color: ({}, {}, {})", r, g, b);
                 materials[materialName].setColor(r, g, b);
             }
             else if (property == "roughness" && parts.size() >= 2) {
                 float value = std::stof(parts[1]);
-                std::cout << "Debug: Setting roughness: " << value << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting roughness: {}", value);
                 materials[materialName].setRoughness(value);
             }
             else if (property == "metallic" && parts.size() >= 2) {
                 float value = std::stof(parts[1]);
-                std::cout << "Debug: Setting metallic: " << value << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting metallic: {}", value);
                 materials[materialName].setMetallic(value);
             }
             else if (property == "specular" && parts.size() >= 2) {
                 float value = std::stof(parts[1]);
-                std::cout << "Debug: Setting specular: " << value << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting specular: {}", value);
                 materials[materialName].setSpecular(value);
             }
             else if (property == "emission" && parts.size() >= 4) {
                 float r = std::stof(parts[1]);
                 float g = std::stof(parts[2]);
                 float b = std::stof(parts[3]);
-                std::cout << "Debug: Setting emission: (" << r << ", " << g << ", " << b << ")" << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting emission: ({}, {}, {})", r, g, b);
                 materials[materialName].setEmission(r, g, b);
             }
             else if (property == "opacity" && parts.size() >= 2) {
                 float value = std::stof(parts[1]);
-                std::cout << "Debug: Setting opacity: " << value << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting opacity: {}", value);
                 materials[materialName].setOpacity(value);
             }
             // Paths with spaces aren't supported - this parser's tokenizer
             // (split()) splits on any space, same pre-existing limitation as
             // every other multi-token property above.
             else if (property == "albedoMap" && parts.size() >= 2) {
-                std::cout << "Debug: Setting albedoMap: " << parts[1] << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting albedoMap: {}", parts[1]);
                 materials[materialName].setAlbedoMapPath(parts[1]);
             }
             else if (property == "roughnessMap" && parts.size() >= 2) {
-                std::cout << "Debug: Setting roughnessMap: " << parts[1] << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting roughnessMap: {}", parts[1]);
                 materials[materialName].setRoughnessMapPath(parts[1]);
             }
             else if (property == "metallicMap" && parts.size() >= 2) {
-                std::cout << "Debug: Setting metallicMap: " << parts[1] << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting metallicMap: {}", parts[1]);
                 materials[materialName].setMetallicMapPath(parts[1]);
             }
             else if (property == "opacityMap" && parts.size() >= 2) {
-                std::cout << "Debug: Setting opacityMap: " << parts[1] << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting opacityMap: {}", parts[1]);
                 materials[materialName].setOpacityMapPath(parts[1]);
             }
             else if (property == "normalMap" && parts.size() >= 2) {
-                std::cout << "Debug: Setting normalMap: " << parts[1] << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting normalMap: {}", parts[1]);
                 materials[materialName].setNormalMapPath(parts[1]);
             }
         }
         catch (const std::exception& e) {
-            std::cerr << "Exception while parsing material property: " << e.what() << std::endl;
+            MIRAGE_LOG_ERROR("Exception while parsing material property: {}", e.what());
         }
     }
 
@@ -946,22 +943,22 @@ private:
         if (parts.empty()) return;
 
         std::string property = parts[0];
-        std::cout << "Debug: Parsing primitive property: " << property << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Parsing primitive property: {}", property);
 
         try {
             if (property == "type" && parts.size() >= 2) {
-                std::cout << "Debug: Setting primitive type: " << parts[1] << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting primitive type: {}", parts[1]);
                 primitive.setType(parts[1]);
             }
             else if (property == "material" && parts.size() >= 2) {
-                std::cout << "Debug: Setting primitive material: " << parts[1] << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting primitive material: {}", parts[1]);
                 primitive.setMaterialName(parts[1]);
             }
             else if (property == "position" && parts.size() >= 4) {
                 float x = std::stof(parts[1]);
                 float y = std::stof(parts[2]);
                 float z = std::stof(parts[3]);
-                std::cout << "Debug: Setting position: (" << x << ", " << y << ", " << z << ")" << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting position: ({}, {}, {})", x, y, z);
                 primitive.setPosition(x, y, z);
             }
             else if (property == "rotation" && parts.size() >= 5) {
@@ -969,17 +966,17 @@ private:
                 float y = std::stof(parts[2]);
                 float z = std::stof(parts[3]);
                 float w = std::stof(parts[4]);
-                std::cout << "Debug: Setting rotation: (" << x << ", " << y << ", " << z << ", " << w << ")" << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting rotation: ({}, {}, {}, {})", x, y, z, w);
                 primitive.setRotation(x, y, z, w);
             }
             else if (property == "scale" && parts.size() >= 2) {
                 float s = std::stof(parts[1]);
-                std::cout << "Debug: Setting scale: " << s << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting scale: {}", s);
                 primitive.setScale(s);
             }
             else if (property == "radius" && parts.size() >= 2) {
                 float r = std::stof(parts[1]);
-                std::cout << "Debug: Setting radius: " << r << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting radius: {}", r);
                 primitive.setRadius(r);
             }
             else if (property == "plane" && parts.size() >= 5) {
@@ -987,22 +984,22 @@ private:
                 float b = std::stof(parts[2]);
                 float c = std::stof(parts[3]);
                 float d = std::stof(parts[4]);
-                std::cout << "Debug: Setting plane: (" << a << ", " << b << ", " << c << ", " << d << ")" << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting plane: ({}, {}, {}, {})", a, b, c, d);
                 primitive.setPlane(a, b, c, d);
             }
             else if (property == "width" && parts.size() >= 2) {
                 float w = std::stof(parts[1]);
-                std::cout << "Debug: Setting width: " << w << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting width: {}", w);
                 primitive.setWidth(w);
             }
             else if (property == "height" && parts.size() >= 2) {
                 float h = std::stof(parts[1]);
-                std::cout << "Debug: Setting height: " << h << std::endl;
+                MIRAGE_LOG_DEBUG("Debug: Setting height: {}", h);
                 primitive.setHeight(h);
             }
         }
         catch (const std::exception& e) {
-            std::cerr << "Exception while parsing primitive property: " << e.what() << std::endl;
+            MIRAGE_LOG_ERROR("Exception while parsing primitive property: {}", e.what());
         }
     }
 
@@ -1010,7 +1007,7 @@ private:
         if (parts.empty()) return;
 
         std::string property = parts[0];
-        std::cout << "Debug: Parsing camera property: " << property << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Parsing camera property: {}", property);
 
         try {
             if (property == "position" && parts.size() >= 4) {
@@ -1048,7 +1045,7 @@ private:
             }
         }
         catch (const std::exception& e) {
-            std::cerr << "Exception while parsing camera property: " << e.what() << std::endl;
+            MIRAGE_LOG_ERROR("Exception while parsing camera property: {}", e.what());
         }
     }
 
@@ -1056,7 +1053,7 @@ private:
         if (parts.empty()) return;
 
         std::string property = parts[0];
-        std::cout << "Debug: Parsing light property: " << property << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Parsing light property: {}", property);
 
         try {
             if (property == "type" && parts.size() >= 2) {
@@ -1082,7 +1079,7 @@ private:
             }
         }
         catch (const std::exception& e) {
-            std::cerr << "Exception while parsing light property: " << e.what() << std::endl;
+            MIRAGE_LOG_ERROR("Exception while parsing light property: {}", e.what());
         }
     }
 
@@ -1090,7 +1087,7 @@ private:
         if (parts.empty()) return;
 
         std::string property = parts[0];
-        std::cout << "Debug: Parsing sky property: " << property << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Parsing sky property: {}", property);
 
         try {
             if (property == "type" && parts.size() >= 2) {
@@ -1113,7 +1110,7 @@ private:
             }
         }
         catch (const std::exception& e) {
-            std::cerr << "Exception while parsing sky property: " << e.what() << std::endl;
+            MIRAGE_LOG_ERROR("Exception while parsing sky property: {}", e.what());
         }
     }
 
@@ -1155,7 +1152,7 @@ bool WriteExr(const std::string &path, const Color *pixels, int width, int heigh
     int ret = SaveEXR(rgba.data(), width, height, 4, /*save_as_fp16=*/0, path.c_str(), &err);
     if (ret != TINYEXR_SUCCESS)
     {
-        std::cerr << "Failed to save EXR: " << (err ? err : "unknown error") << std::endl;
+        MIRAGE_LOG_ERROR("Failed to save EXR: {}", (err ? err : "unknown error"));
         if (err)
             FreeEXRErrorMessage(err);
         return false;
@@ -1166,14 +1163,62 @@ bool WriteExr(const std::string &path, const Color *pixels, int width, int heigh
 // Main function
 int main(int argc, char *argv[])
 {
-    if (argc < 3)
+    // Default level so usage/parse errors below are visible even before
+    // --log-level (if any) is parsed out of argv.
+    Mirage::Logging::Init();
+    Mirage::Logging::InstallCrashHandler();
+
+    // No existing flag-parsing infrastructure here (this CLI has always been
+    // purely positional - <scene_file> <output_image> [width] [height]
+    // [samples]) so --log-level is stripped out of argv in its own pass
+    // before positional parsing below, rather than threading a real option
+    // parser through this whole function for one flag.
+    Mirage::Logging::Level logLevel = Mirage::Logging::Level::eInfo;
+    std::vector<std::string> args;
+    for (int i = 0; i < argc; ++i)
     {
-        std::cerr << "Usage: " << argv[0] << " <scene_file> <output_image> [width] [height] [samples]" << std::endl;
+        std::string arg = argv[i];
+        static const std::string kLogLevelEq = "--log-level=";
+        if (arg.rfind(kLogLevelEq, 0) == 0 || arg == "--log-level")
+        {
+            std::string value;
+            if (arg == "--log-level")
+            {
+                if (i + 1 >= argc)
+                {
+                    MIRAGE_LOG_ERROR("--log-level requires a value (trace|debug|info|warn|error|critical)");
+                    return 1;
+                }
+                value = argv[++i];
+            }
+            else
+            {
+                value = arg.substr(kLogLevelEq.size());
+            }
+
+            if (!Mirage::Logging::ParseLevel(value.c_str(), &logLevel))
+            {
+                MIRAGE_LOG_ERROR("Unrecognized --log-level value '{}' (want trace|debug|info|warn|error|critical)", value);
+                return 1;
+            }
+            continue;
+        }
+        args.push_back(arg);
+    }
+
+    if (logLevel != Mirage::Logging::Level::eInfo)
+        Mirage::Logging::Init(logLevel);
+
+    if (args.size() < 3)
+    {
+        MIRAGE_LOG_ERROR(
+            "Usage: {} [--log-level trace|debug|info|warn|error|critical] <scene_file> <output_image> [width] [height] [samples]",
+            args.empty() ? "scene_renderer" : args[0]);
         return 1;
     }
 
-    std::string sceneFile = argv[1];
-    std::string outputFile = argv[2];
+    std::string sceneFile = args[1];
+    std::string outputFile = args[2];
 
     // Default rendering parameters
     int width = 1280;
@@ -1181,36 +1226,36 @@ int main(int argc, char *argv[])
     int samples = 64;
 
     // Parse optional parameters
-    if (argc > 3)
-        width = std::stoi(argv[3]);
-    if (argc > 4)
-        height = std::stoi(argv[4]);
-    if (argc > 5)
-        samples = std::stoi(argv[5]);
+    if (args.size() > 3)
+        width = std::stoi(args[3]);
+    if (args.size() > 4)
+        height = std::stoi(args[4]);
+    if (args.size() > 5)
+        samples = std::stoi(args[5]);
 
-    std::cout << "Debug: Starting to parse scene file: " << sceneFile << std::endl;
+    MIRAGE_LOG_DEBUG("Debug: Starting to parse scene file: {}", sceneFile);
 
     // Parse the scene file
     SceneParser parser;
     if (!parser.parse(sceneFile))
     {
-        std::cerr << "Failed to parse scene file." << std::endl;
+        MIRAGE_LOG_ERROR("Failed to parse scene file.");
         return 1;
     }
 
-    std::cout << "Debug: Scene file parsed successfully" << std::endl;
+    MIRAGE_LOG_DEBUG("Debug: Scene file parsed successfully");
 
     // Create and setup the scene
     Scene scene;
-    std::cout << "Debug: Setting up scene" << std::endl;
+    MIRAGE_LOG_DEBUG("Debug: Setting up scene");
     parser.setupScene(scene);
 
-    std::cout << "Debug: Scene setup complete, primitives count: " << scene.primitives.size() << std::endl;
+    MIRAGE_LOG_DEBUG("Debug: Scene setup complete, primitives count: {}", scene.primitives.size());
 
     // Create a default camera if none was specified in the scene
     if (!scene.camera)
     {
-        std::cout << "Debug: Creating default camera" << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Creating default camera");
         auto camera = std::make_unique<Camera>();
         camera->position = Vec3(0.0f, 2.0f, 5.0f);
         // camera->lookAt = Vec3(0.0f, 0.0f, 0.0f);
@@ -1222,19 +1267,19 @@ int main(int argc, char *argv[])
     }
 
     // Render the scene
-    std::cout << "Rendering scene to " << outputFile << " (" << width << "x" << height << ", " << samples << " samples)" << std::endl;
+    MIRAGE_LOG_DEBUG("Rendering scene to {} ({}x{}, {} samples)", outputFile, width, height, samples);
 
     // Create renderer
-    std::cout << "Debug: Creating renderer" << std::endl;
+    MIRAGE_LOG_DEBUG("Debug: Creating renderer");
     Renderer *renderer = CreateCpuRenderer(&scene);
     if (!renderer)
     {
-        std::cerr << "Failed to create renderer" << std::endl;
+        MIRAGE_LOG_ERROR("Failed to create renderer");
         return 1;
     }
 
     // Setup rendering options
-    std::cout << "Debug: Setting up rendering options" << std::endl;
+    MIRAGE_LOG_DEBUG("Debug: Setting up rendering options");
     Options options;
     options.width = width;
     options.height = height;
@@ -1255,31 +1300,31 @@ int main(int argc, char *argv[])
     options.exposure *= scene.camera->ComputeExposureMultiplier();
 
     // Allocate memory for output image
-    std::cout << "Debug: Allocating memory for output image" << std::endl;
+    MIRAGE_LOG_DEBUG("Debug: Allocating memory for output image");
     std::vector<Color> outputImage(width * height, Color(0.0f));
 
     // Render the scene
-    std::cout << "Debug: Starting rendering" << std::endl;
+    MIRAGE_LOG_DEBUG("Debug: Starting rendering");
     try
     {
         renderer->Render(*scene.camera, options, outputImage.data());
-        std::cout << "Debug: Rendering completed" << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Rendering completed");
     }
     catch (const std::exception &e)
     {
-        std::cerr << "Exception during rendering: " << e.what() << std::endl;
+        MIRAGE_LOG_ERROR("Exception during rendering: {}", e.what());
         delete renderer;
         return 1;
     }
     catch (...)
     {
-        std::cerr << "Unknown exception during rendering" << std::endl;
+        MIRAGE_LOG_ERROR("Unknown exception during rendering");
         delete renderer;
         return 1;
     }
 
     // Save the image
-    std::cout << "Debug: Saving image" << std::endl;
+    MIRAGE_LOG_DEBUG("Debug: Saving image");
     std::string extension = outputFile.substr(outputFile.find_last_of(".") + 1);
     bool success = false;
 
@@ -1287,13 +1332,13 @@ int main(int argc, char *argv[])
     {
         // Full float32, untonemapped output - skip the 8-bit LDR conversion
         // below entirely, tonemapping/quantization are LDR-only concerns.
-        std::cout << "Debug: Writing float EXR output" << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Writing float EXR output");
         success = WriteExr(outputFile, outputImage.data(), width, height);
     }
     else
     {
         // Convert the rendered image to 8-bit RGB for saving
-        std::cout << "Debug: Converting image for saving" << std::endl;
+        MIRAGE_LOG_DEBUG("Debug: Converting image for saving");
         std::vector<unsigned char> imageData(width * height * 3);
 
         for (int i = 0; i < width * height; i++)
@@ -1333,7 +1378,7 @@ int main(int argc, char *argv[])
             // Unrecognized extension: replace it with .png rather than
             // appending, so e.g. "out.foo" becomes "out.png", not
             // "out.foo.png".
-            std::cerr << "Warning: unrecognized output extension '" << extension << "', defaulting to PNG" << std::endl;
+            MIRAGE_LOG_WARN("Unrecognized output extension '{}', defaulting to PNG", extension);
             size_t dotPos = outputFile.find_last_of(".");
             outputFile = (dotPos != std::string::npos) ? outputFile.substr(0, dotPos) + ".png" : outputFile + ".png";
             success = stbi_write_png(outputFile.c_str(), width, height, 3, imageData.data(), width * 3) != 0;
@@ -1342,16 +1387,16 @@ int main(int argc, char *argv[])
 
     if (success)
     {
-        std::cout << "Image saved to " << outputFile << std::endl;
+        MIRAGE_LOG_DEBUG("Image saved to {}", outputFile);
     }
     else
     {
-        std::cerr << "Failed to save image to " << outputFile << std::endl;
+        MIRAGE_LOG_ERROR("Failed to save image to {}", outputFile);
         return 1;
     }
 
     // Clean up
-    std::cout << "Debug: Cleaning up" << std::endl;
+    MIRAGE_LOG_DEBUG("Debug: Cleaning up");
     delete renderer;
 
     return 0;

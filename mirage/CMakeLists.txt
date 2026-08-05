@@ -5,6 +5,29 @@ find_package(OpenMP)
 # render path (CUDA has been removed - it was never wired into this build).
 find_package(Vulkan REQUIRED)
 
+# spdlog: structured logging (mirage/utils/Log.h), resolving
+# docs/PRODUCTION_READINESS.md's Tier 3 "no logging framework" finding.
+# Pinned by tag, fetched reproducibly rather than vendored - same pattern as
+# the Slang/slang-rhi pins in kernels/CMakeLists.txt. Declared here (not in
+# tests/CMakeLists.txt) because it's a real runtime dependency of the Mirage
+# library itself, not just of the test suite; tools/scene_renderer and
+# tools/kernel_validate additionally link spdlog::spdlog_header_only directly (see their
+# own CMakeLists.txt) since Mirage links it PRIVATE and CMake doesn't
+# propagate a PRIVATE dependency's include paths to consumers - the imported
+# spdlog::spdlog_header_only target itself is visible globally once FetchContent_MakeAvailable
+# runs here, since add_subdirectory(mirage) is processed before
+# add_subdirectory(tools) in the top-level CMakeLists.txt.
+include(FetchContent)
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
+    cmake_policy(SET CMP0135 NEW)
+endif()
+FetchContent_Declare(
+    spdlog
+    GIT_REPOSITORY https://github.com/gabime/spdlog.git
+    GIT_TAG v1.17.0
+)
+FetchContent_MakeAvailable(spdlog)
+
 add_subdirectory(kernels)
 
 # build static library
@@ -17,6 +40,8 @@ add_library(Mirage STATIC
     filter/NLM.cpp
     prims/Mesh.cpp
     shaders/TextureLoader.cpp
+    utils/Log.cpp
+    utils/CrashHandler.cpp
 )
 
 set_target_properties(Mirage PROPERTIES
@@ -28,6 +53,22 @@ set_target_properties(Mirage PROPERTIES
 if(OpenMP_CXX_FOUND)
     target_link_libraries(Mirage PRIVATE OpenMP::OpenMP_CXX)
 endif()
+
+# $<BUILD_INTERFACE:...>: spdlog_header_only is a plain FetchContent'd
+# INTERFACE target with no install()/export rules of its own (same class of
+# problem slang-rhi's target has below, but simpler to resolve here - since
+# it's header-only, spdlog's code is fully inlined into Mirage's own compiled
+# .cpp files at build time, so an installed libMirage.a has no leftover
+# spdlog symbol requirement for downstream consumers to satisfy; unlike
+# slang-rhi there is no compiled artifact that also needs bundling into the
+# install for INSTALL_INTERFACE). Without this generator-expression guard,
+# `install(EXPORT MirageTargets ...)` below fails configure with "requires
+# target spdlog_header_only that is not in any export set".
+target_link_libraries(Mirage PRIVATE $<BUILD_INTERFACE:spdlog::spdlog_header_only>)
+# See mirage/utils/Log.h's comment on MIRAGE_LOG_TRACE/DEBUG: without this,
+# spdlog's default compile-time active level (info) would silently no-op
+# those macros regardless of Mirage::Logging::Init()'s runtime level.
+target_compile_definitions(Mirage PRIVATE SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_TRACE)
 
 # PUBLIC: consumers linking Mirage::Mirage (e.g. hdMirage) also need the Vulkan
 # loader symbols, since VulkanRenderer.h's interface is reachable from Renderer.h.

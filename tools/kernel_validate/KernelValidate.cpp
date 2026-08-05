@@ -2,6 +2,14 @@
 // correctness loop for the Slang/Vulkan kernel port, per the plan
 // (~/.claude/plans/think-through-refactoring-mirage-fluttering-rainbow.md).
 //
+// Logging note: the per-test progress printf()s throughout this file and the
+// final PASS/FAIL line in main() are a deliberate carve-out from Mirage's
+// MIRAGE_LOG_* logging (mirage/utils/Log.h) - this binary's plain-stdout
+// output is its actual machine-readable contract (CI's kernel_validate step
+// and local `| tail -1` usage depend on it), not a diagnostic stream. Only
+// the fprintf(stderr, ...) error-path messages were migrated to
+// MIRAGE_LOG_ERROR; see main()'s closing comment for the same rationale.
+//
 // M1: builds a scene with one sphere + one mesh primitive, renders it with both
 // CreateCpuRenderer and CreateVulkanRenderer in eNormals mode, and reports a
 // per-pixel MSE. eNormals writes a final Color directly (no filter-splat
@@ -27,6 +35,8 @@
 #include "mirage/core/Scene.h"
 #include "mirage/camera/Camera.h"
 #include "mirage/prims/Mesh.h"
+#include "mirage/utils/CrashHandler.h"
+#include "mirage/utils/Log.h"
 #include "mirage/utils/Util.h"
 #include "mirage/shaders/Disney.h"
 #include "mirage/shaders/TextureSampling.h"
@@ -205,7 +215,7 @@ namespace
             std::unique_ptr<VulkanRenderer> gpuRenderer(static_cast<VulkanRenderer *>(CreateVulkanRenderer(&scene)));
             if (!gpuRenderer->IsAvailable())
             {
-                fprintf(stderr, "FAIL: VulkanRenderer not available on this machine\n");
+                MIRAGE_LOG_ERROR("FAIL: VulkanRenderer not available on this machine");
                 return false;
             }
             gpuRenderer->Init(width, height);
@@ -357,7 +367,7 @@ namespace
             std::unique_ptr<VulkanRenderer> gpuRenderer(static_cast<VulkanRenderer *>(CreateVulkanRenderer(dummyScene.get())));
             if (!gpuRenderer->IsAvailable())
             {
-                fprintf(stderr, "FAIL: VulkanRenderer not available on this machine\n");
+                MIRAGE_LOG_ERROR("FAIL: VulkanRenderer not available on this machine");
                 return false;
             }
             gpuRenderer->RunBsdfTest(gpuCases.data(), gpuResults.data(), count);
@@ -698,7 +708,7 @@ namespace
             std::unique_ptr<VulkanRenderer> gpuRenderer(static_cast<VulkanRenderer *>(CreateVulkanRenderer(&scene)));
             if (!gpuRenderer->IsAvailable())
             {
-                fprintf(stderr, "FAIL: VulkanRenderer not available on this machine\n");
+                MIRAGE_LOG_ERROR("FAIL: VulkanRenderer not available on this machine");
                 return false;
             }
             gpuRenderer->RunPathTraceTest(gpuCases.data(), gpuResults.data(), count);
@@ -777,7 +787,7 @@ namespace
         std::unique_ptr<VulkanRenderer> gpuRenderer(static_cast<VulkanRenderer *>(CreateVulkanRenderer(&scene)));
         if (!gpuRenderer->IsAvailable())
         {
-            fprintf(stderr, "[M3 PathTrace smoke test] SKIP: VulkanRenderer not available\n");
+            MIRAGE_LOG_ERROR("[M3 PathTrace smoke test] SKIP: VulkanRenderer not available");
             return;
         }
         gpuRenderer->Init(width, height);
@@ -896,7 +906,7 @@ namespace
             std::unique_ptr<VulkanRenderer> gpuRenderer(static_cast<VulkanRenderer *>(CreateVulkanRenderer(&scene)));
             if (!gpuRenderer->IsAvailable())
             {
-                fprintf(stderr, "[M9 Motion blur] FAIL: VulkanRenderer not available\n");
+                MIRAGE_LOG_ERROR("[M9 Motion blur] FAIL: VulkanRenderer not available");
                 return false;
             }
             gpuRenderer->RunPathTraceTest(gpuCases.data(), gpuResults.data(), kNumTimeSamples);
@@ -1279,7 +1289,7 @@ namespace
                 std::unique_ptr<VulkanRenderer> gpuRenderer(static_cast<VulkanRenderer *>(CreateVulkanRenderer(&scene)));
                 if (!gpuRenderer->IsAvailable())
                 {
-                    fprintf(stderr, "[M11 Opacity] FAIL: VulkanRenderer not available\n");
+                    MIRAGE_LOG_ERROR("[M11 Opacity] FAIL: VulkanRenderer not available");
                     return false;
                 }
                 gpuRenderer->RunPathTraceTest(gpuCases.data(), gpuResults.data(), kOpacitySampleCount);
@@ -1363,7 +1373,7 @@ namespace
                     std::unique_ptr<VulkanRenderer> gpuRenderer(static_cast<VulkanRenderer *>(CreateVulkanRenderer(&shadowScene)));
                     if (!gpuRenderer->IsAvailable())
                     {
-                        fprintf(stderr, "[M11 Opacity] FAIL: VulkanRenderer not available (shadow sub-test)\n");
+                        MIRAGE_LOG_ERROR("[M11 Opacity] FAIL: VulkanRenderer not available (shadow sub-test)");
                         return false;
                     }
                     gpuRenderer->RunPathTraceTest(gpuCases.data(), gpuResults.data(), kShadowSampleCount);
@@ -1760,7 +1770,7 @@ namespace
                 std::unique_ptr<VulkanRenderer> gpuRenderer(static_cast<VulkanRenderer *>(CreateVulkanRenderer(&scene)));
                 if (!gpuRenderer->IsAvailable())
                 {
-                    fprintf(stderr, "[M8 TextureSampling GPU] SKIP: VulkanRenderer not available\n");
+                    MIRAGE_LOG_ERROR("[M8 TextureSampling GPU] SKIP: VulkanRenderer not available");
                     gpuPass = false;
                 }
                 else
@@ -1770,7 +1780,7 @@ namespace
                                                                   gpuCases.data(), gpuResults.data(), (int)testUVs.size());
                     if (!ran)
                     {
-                        fprintf(stderr, "[M8 TextureSampling GPU] FAIL: dispatch did not run\n");
+                        MIRAGE_LOG_ERROR("[M8 TextureSampling GPU] FAIL: dispatch did not run");
                         gpuPass = false;
                     }
                 }
@@ -2196,7 +2206,7 @@ namespace
         std::unique_ptr<VulkanRenderer> gpuRenderer(static_cast<VulkanRenderer *>(CreateVulkanRenderer(nullptr)));
         if (!gpuRenderer->IsAvailable())
         {
-            fprintf(stderr, "FAIL: VulkanRenderer not available on this machine\n");
+            MIRAGE_LOG_ERROR("FAIL: VulkanRenderer not available on this machine");
             return false;
         }
 
@@ -2272,7 +2282,7 @@ namespace
             std::unique_ptr<VulkanRenderer> gpuRenderer(static_cast<VulkanRenderer *>(CreateVulkanRenderer(&scene)));
             if (!gpuRenderer->IsAvailable())
             {
-                fprintf(stderr, "FAIL: VulkanRenderer not available on this machine\n");
+                MIRAGE_LOG_ERROR("FAIL: VulkanRenderer not available on this machine");
                 return false;
             }
             gpuRenderer->RunProbeTest(gpuCases.data(), gpuResults.data(), count);
@@ -2342,6 +2352,9 @@ namespace
 
 int main()
 {
+    Mirage::Logging::Init();
+    Mirage::Logging::InstallCrashHandler();
+
     bool normalsPass = RunNormalsValidation();
     bool bsdfPass = RunBsdfValidation();
     bool pathTracePass = RunPathTraceValidation(
@@ -2388,6 +2401,15 @@ int main()
                 textureArraySpikePass && textureSamplingPass && pathTraceTexturedPass && motionBlurPass &&
                 instancingPass && opacityPass && normalMappingPass && punctualLightsPass &&
                 mipmapPass && udimPass;
+    // Deliberately plain stdout, not MIRAGE_LOG_*: this is this binary's
+    // actual output contract, not a diagnostic - .github/workflows/
+    // build-release.yml's CI step and any local `kernel_validate | tail -1`
+    // usage depend on exactly one "PASS"/"FAIL" line reaching stdout with no
+    // logger prefix/timestamp wrapped around it. The per-test progress
+    // printf()s throughout this file (RunXValidation()'s own output) are the
+    // same deliberate carve-out for the same reason - see this file's header
+    // comment. Only the fprintf(stderr, ...) error-path messages were
+    // migrated to MIRAGE_LOG_ERROR.
     printf("%s\n", pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;
 }

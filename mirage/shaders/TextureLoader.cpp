@@ -1,10 +1,10 @@
 #include "mirage/shaders/TextureLoader.h"
+#include "mirage/utils/Log.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "mirage/thirdparty/stb_image.h"
 
 #include <cmath>
-#include <cstdio>
 
 namespace Mirage
 {
@@ -28,7 +28,7 @@ namespace Mirage
         float *pixels = stbi_loadf(path.c_str(), &width, &height, &channelsInFile, 4);
         if (!pixels)
         {
-            fprintf(stderr, "LoadTextureFromFile: failed to load '%s': %s\n", path.c_str(), stbi_failure_reason());
+            MIRAGE_LOG_ERROR("LoadTextureFromFile: failed to load '{}': {}", path, stbi_failure_reason());
             return nullptr;
         }
 

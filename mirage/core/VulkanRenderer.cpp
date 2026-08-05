@@ -1,12 +1,12 @@
 #include "mirage/core/VulkanRenderer.h"
 #include "mirage/core/Scene.h"
 #include "mirage/kernels/GpuLayout.h"
+#include "mirage/utils/Log.h"
 #include "mirage/utils/Util.h"
 
 #include <slang-rhi.h>
 #include <slang-rhi/shader-cursor.h>
 
-#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -135,7 +135,14 @@ namespace Mirage
         // 1x1 white dummy for the remaining slots - same "always bind
         // something, the pipeline's descriptor layout is fixed regardless of
         // runtime scene content" reasoning as probeTexture's dummy.
-        static const uint32_t kMaxMaterialTextures = 32;
+        // constexpr (not just const): MIRAGE_LOG_ERROR's fmt-based variadic
+        // args bind by reference, which ODR-uses this member - a plain
+        // `static const` needs an out-of-class definition to satisfy that at
+        // link time (fprintf's by-value varargs never had this requirement,
+        // which is why this wasn't caught before the logging migration).
+        // `static constexpr` is implicitly inline in C++17, so no separate
+        // definition is needed.
+        static constexpr uint32_t kMaxMaterialTextures = 32;
         std::vector<ComPtr<ITexture>> materialTextures;
         ComPtr<ISampler> materialTextureSampler;
         // Per-slot width/height/UDIM-grid metadata (Tier-2 "mipmapping"/
@@ -180,8 +187,10 @@ namespace Mirage
             Result result = getRHI()->createDevice(desc, device.writeRef());
             if (SLANG_FAILED(result) || !device)
             {
-                fprintf(stderr, "VulkanRenderer: failed to create Vulkan device via slang-rhi (result=0x%08x). "
-                                "Falling back to CPU renderer.\n", (unsigned)result);
+                MIRAGE_LOG_ERROR(
+                    "VulkanRenderer: failed to create Vulkan device via slang-rhi (result=0x{:08x}). "
+                    "Falling back to CPU renderer.",
+                    (unsigned)result);
                 return false;
             }
             return true;
@@ -196,21 +205,21 @@ namespace Mirage
             ComPtr<slang::ISession> session = device->getSlangSession();
             if (!session)
             {
-                fprintf(stderr, "VulkanRenderer: device has no Slang session\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: device has no Slang session");
                 return false;
             }
 
             ComPtr<slang::IBlob> diagnostics;
             slang::IModule *module = session->loadModule(moduleName, diagnostics.writeRef());
             if (diagnostics && diagnostics->getBufferSize() > 0)
-                fprintf(stderr, "VulkanRenderer (slang, %s): %s\n", moduleName, (const char *)diagnostics->getBufferPointer());
+                MIRAGE_LOG_ERROR("VulkanRenderer (slang, {}): {}", moduleName, (const char *)diagnostics->getBufferPointer());
             if (!module)
                 return false;
 
             ComPtr<slang::IEntryPoint> entryPoint;
             if (SLANG_FAILED(module->findEntryPointByName("main", entryPoint.writeRef())) || !entryPoint)
             {
-                fprintf(stderr, "VulkanRenderer: %s.slang has no 'main' entry point\n", moduleName);
+                MIRAGE_LOG_ERROR("VulkanRenderer: {}.slang has no 'main' entry point", moduleName);
                 return false;
             }
 
@@ -221,7 +230,7 @@ namespace Mirage
                     components.data(), components.size(), composed.writeRef(), diagnostics.writeRef())))
             {
                 if (diagnostics)
-                    fprintf(stderr, "VulkanRenderer (slang, %s): %s\n", moduleName, (const char *)diagnostics->getBufferPointer());
+                    MIRAGE_LOG_ERROR("VulkanRenderer (slang, {}): {}", moduleName, (const char *)diagnostics->getBufferPointer());
                 return false;
             }
 
@@ -230,7 +239,7 @@ namespace Mirage
             if (SLANG_FAILED(composed->link(linked.writeRef(), diagnostics.writeRef())))
             {
                 if (diagnostics)
-                    fprintf(stderr, "VulkanRenderer (slang, %s): %s\n", moduleName, (const char *)diagnostics->getBufferPointer());
+                    MIRAGE_LOG_ERROR("VulkanRenderer (slang, {}): {}", moduleName, (const char *)diagnostics->getBufferPointer());
                 return false;
             }
 
@@ -242,7 +251,7 @@ namespace Mirage
             if (SLANG_FAILED(device->createShaderProgram(programDesc, program.writeRef(), programDiagnostics.writeRef())))
             {
                 if (programDiagnostics)
-                    fprintf(stderr, "VulkanRenderer (rhi, %s): %s\n", moduleName, (const char *)programDiagnostics->getBufferPointer());
+                    MIRAGE_LOG_ERROR("VulkanRenderer (rhi, {}): {}", moduleName, (const char *)programDiagnostics->getBufferPointer());
                 return false;
             }
 
@@ -250,7 +259,7 @@ namespace Mirage
             pipelineDesc.program = program.get();
             if (SLANG_FAILED(device->createComputePipeline(pipelineDesc, outPipeline.writeRef())))
             {
-                fprintf(stderr, "VulkanRenderer: failed to create compute pipeline for %s\n", moduleName);
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to create compute pipeline for {}", moduleName);
                 return false;
             }
             return true;
@@ -403,9 +412,10 @@ namespace Mirage
                 // likely than before (one atlas per UDIM material, vs. one
                 // slot per ordinary texture), so surface it explicitly
                 // rather than let materials quietly render wrong.
-                fprintf(stderr, "VulkanRenderer: scene has %zu textures, exceeding kMaxMaterialTextures (%u) - "
-                                 "textures at index >= %u will render as opaque white on the GPU backend.\n",
-                        realCount, kMaxMaterialTextures, kMaxMaterialTextures);
+                MIRAGE_LOG_ERROR(
+                    "VulkanRenderer: scene has {} textures, exceeding kMaxMaterialTextures ({}) - "
+                    "textures at index >= {} will render as opaque white on the GPU backend.",
+                    realCount, kMaxMaterialTextures, kMaxMaterialTextures);
             }
 
             for (uint32_t i = 0; i < kMaxMaterialTextures; ++i)
@@ -729,7 +739,7 @@ namespace Mirage
             ComPtr<IBuffer> outputBuffer;
             if (SLANG_FAILED(device->createBuffer(outDesc, nullptr, outputBuffer.writeRef())))
             {
-                fprintf(stderr, "VulkanRenderer: failed to create normals output buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to create normals output buffer");
                 return;
             }
 
@@ -765,7 +775,7 @@ namespace Mirage
             ComPtr<ISlangBlob> readback;
             if (SLANG_FAILED(device->readBuffer(outputBuffer, 0, outDesc.size, readback.writeRef())) || !readback)
             {
-                fprintf(stderr, "VulkanRenderer: failed to read back normals output buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to read back normals output buffer");
                 return;
             }
             memcpy(output, readback->getBufferPointer(), outDesc.size);
@@ -886,7 +896,7 @@ namespace Mirage
             size_t accumSize = (size_t)options.width * (size_t)options.height * sizeof(float) * 4;
             if (SLANG_FAILED(device->readBuffer(accumBuffer, 0, accumSize, readback.writeRef())) || !readback)
             {
-                fprintf(stderr, "VulkanRenderer: failed to read back accumulation buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to read back accumulation buffer");
                 return;
             }
 
@@ -941,7 +951,7 @@ namespace Mirage
             ComPtr<IBuffer> frameBuf;
             if (SLANG_FAILED(device->createBuffer(frameDesc, &frame, frameBuf.writeRef())))
             {
-                fprintf(stderr, "VulkanRenderer: failed to create PathTrace test frame buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to create PathTrace test frame buffer");
                 return;
             }
 
@@ -954,7 +964,7 @@ namespace Mirage
             ComPtr<IBuffer> casesBuf;
             if (SLANG_FAILED(device->createBuffer(casesDesc, cases, casesBuf.writeRef())))
             {
-                fprintf(stderr, "VulkanRenderer: failed to create PathTrace test cases buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to create PathTrace test cases buffer");
                 return;
             }
 
@@ -968,7 +978,7 @@ namespace Mirage
             ComPtr<IBuffer> resultsBuf;
             if (SLANG_FAILED(device->createBuffer(resultsDesc, nullptr, resultsBuf.writeRef())))
             {
-                fprintf(stderr, "VulkanRenderer: failed to create PathTrace test results buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to create PathTrace test results buffer");
                 return;
             }
 
@@ -1015,7 +1025,7 @@ namespace Mirage
             ComPtr<ISlangBlob> readback;
             if (SLANG_FAILED(device->readBuffer(resultsBuf, 0, resultsDesc.size, readback.writeRef())) || !readback)
             {
-                fprintf(stderr, "VulkanRenderer: failed to read back PathTrace test results\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to read back PathTrace test results");
                 return;
             }
             memcpy(results, readback->getBufferPointer(), resultsDesc.size);
@@ -1040,7 +1050,7 @@ namespace Mirage
             ComPtr<IBuffer> frameBuf;
             if (SLANG_FAILED(device->createBuffer(frameDesc, &frame, frameBuf.writeRef())))
             {
-                fprintf(stderr, "VulkanRenderer: failed to create Probe test frame buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to create Probe test frame buffer");
                 return;
             }
 
@@ -1053,7 +1063,7 @@ namespace Mirage
             ComPtr<IBuffer> casesBuf;
             if (SLANG_FAILED(device->createBuffer(casesDesc, cases, casesBuf.writeRef())))
             {
-                fprintf(stderr, "VulkanRenderer: failed to create Probe test cases buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to create Probe test cases buffer");
                 return;
             }
 
@@ -1067,7 +1077,7 @@ namespace Mirage
             ComPtr<IBuffer> resultsBuf;
             if (SLANG_FAILED(device->createBuffer(resultsDesc, nullptr, resultsBuf.writeRef())))
             {
-                fprintf(stderr, "VulkanRenderer: failed to create Probe test results buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to create Probe test results buffer");
                 return;
             }
 
@@ -1099,7 +1109,7 @@ namespace Mirage
             ComPtr<ISlangBlob> readback;
             if (SLANG_FAILED(device->readBuffer(resultsBuf, 0, resultsDesc.size, readback.writeRef())) || !readback)
             {
-                fprintf(stderr, "VulkanRenderer: failed to read back Probe test results\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to read back Probe test results");
                 return;
             }
             memcpy(results, readback->getBufferPointer(), resultsDesc.size);
@@ -1126,7 +1136,7 @@ namespace Mirage
             ComPtr<IBuffer> frameBuffer;
             if (SLANG_FAILED(device->createBuffer(frameBufferDesc, &frame, frameBuffer.writeRef())))
             {
-                fprintf(stderr, "VulkanRenderer: failed to create frame params buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to create frame params buffer");
                 return;
             }
 
@@ -1142,7 +1152,7 @@ namespace Mirage
             ComPtr<IBuffer> outputBuffer;
             if (SLANG_FAILED(device->createBuffer(bufferDesc, nullptr, outputBuffer.writeRef())))
             {
-                fprintf(stderr, "VulkanRenderer: failed to create output buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to create output buffer");
                 return;
             }
 
@@ -1167,7 +1177,7 @@ namespace Mirage
             ComPtr<ISlangBlob> readback;
             if (SLANG_FAILED(device->readBuffer(outputBuffer, 0, bufferDesc.size, readback.writeRef())) || !readback)
             {
-                fprintf(stderr, "VulkanRenderer: failed to read back output buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to read back output buffer");
                 return;
             }
 
@@ -1188,7 +1198,7 @@ namespace Mirage
             ComPtr<IBuffer> frameBuf;
             if (SLANG_FAILED(device->createBuffer(frameDesc, &frame, frameBuf.writeRef())))
             {
-                fprintf(stderr, "VulkanRenderer: failed to create BSDF test frame buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to create BSDF test frame buffer");
                 return;
             }
 
@@ -1201,7 +1211,7 @@ namespace Mirage
             ComPtr<IBuffer> casesBuf;
             if (SLANG_FAILED(device->createBuffer(casesDesc, cases, casesBuf.writeRef())))
             {
-                fprintf(stderr, "VulkanRenderer: failed to create BSDF test cases buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to create BSDF test cases buffer");
                 return;
             }
 
@@ -1215,7 +1225,7 @@ namespace Mirage
             ComPtr<IBuffer> resultsBuf;
             if (SLANG_FAILED(device->createBuffer(resultsDesc, nullptr, resultsBuf.writeRef())))
             {
-                fprintf(stderr, "VulkanRenderer: failed to create BSDF test results buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to create BSDF test results buffer");
                 return;
             }
 
@@ -1241,7 +1251,7 @@ namespace Mirage
             ComPtr<ISlangBlob> readback;
             if (SLANG_FAILED(device->readBuffer(resultsBuf, 0, resultsDesc.size, readback.writeRef())) || !readback)
             {
-                fprintf(stderr, "VulkanRenderer: failed to read back BSDF test results\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to read back BSDF test results");
                 return;
             }
             memcpy(results, readback->getBufferPointer(), resultsDesc.size);
@@ -1282,7 +1292,7 @@ namespace Mirage
                 sub.slicePitch = 0;
                 if (SLANG_FAILED(device->createTexture(texDesc, &sub, textures[i].writeRef())))
                 {
-                    fprintf(stderr, "VulkanRenderer: M5 spike failed to create texture %u\n", i);
+                    MIRAGE_LOG_ERROR("VulkanRenderer: M5 spike failed to create texture {}", i);
                     return false;
                 }
             }
@@ -1306,7 +1316,7 @@ namespace Mirage
             ComPtr<IBuffer> outputBuf;
             if (SLANG_FAILED(device->createBuffer(outputDesc, nullptr, outputBuf.writeRef())))
             {
-                fprintf(stderr, "VulkanRenderer: M5 spike failed to create output buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: M5 spike failed to create output buffer");
                 return false;
             }
 
@@ -1332,7 +1342,7 @@ namespace Mirage
             ComPtr<ISlangBlob> readback;
             if (SLANG_FAILED(device->readBuffer(outputBuf, 0, outputDesc.size, readback.writeRef())) || !readback)
             {
-                fprintf(stderr, "VulkanRenderer: M5 spike failed to read back output buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: M5 spike failed to read back output buffer");
                 return false;
             }
             memcpy(outColors, readback->getBufferPointer(), outputDesc.size);
@@ -1369,7 +1379,7 @@ namespace Mirage
             ComPtr<IBuffer> frameBuf;
             if (SLANG_FAILED(device->createBuffer(frameDesc, &frame, frameBuf.writeRef())))
             {
-                fprintf(stderr, "VulkanRenderer: failed to create TextureSampleTest frame buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to create TextureSampleTest frame buffer");
                 return false;
             }
 
@@ -1382,7 +1392,7 @@ namespace Mirage
             ComPtr<IBuffer> casesBuf;
             if (SLANG_FAILED(device->createBuffer(casesDesc, cases, casesBuf.writeRef())))
             {
-                fprintf(stderr, "VulkanRenderer: failed to create TextureSampleTest cases buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to create TextureSampleTest cases buffer");
                 return false;
             }
 
@@ -1396,7 +1406,7 @@ namespace Mirage
             ComPtr<IBuffer> resultsBuf;
             if (SLANG_FAILED(device->createBuffer(resultsDesc, nullptr, resultsBuf.writeRef())))
             {
-                fprintf(stderr, "VulkanRenderer: failed to create TextureSampleTest results buffer\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to create TextureSampleTest results buffer");
                 return false;
             }
 
@@ -1425,7 +1435,7 @@ namespace Mirage
             ComPtr<ISlangBlob> readback;
             if (SLANG_FAILED(device->readBuffer(resultsBuf, 0, resultsDesc.size, readback.writeRef())) || !readback)
             {
-                fprintf(stderr, "VulkanRenderer: failed to read back TextureSampleTest results\n");
+                MIRAGE_LOG_ERROR("VulkanRenderer: failed to read back TextureSampleTest results");
                 return false;
             }
             memcpy(results, readback->getBufferPointer(), resultsDesc.size);
