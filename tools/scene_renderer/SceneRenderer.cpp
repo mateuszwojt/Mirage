@@ -174,6 +174,58 @@ private:
     std::string normalMapPath;
 };
 
+// Camera definition class - mirrors MaterialDefinition's shape (plain
+// setters + a toCamera() converter). Unlike materials/primitives, a scene
+// has at most one camera, so the parser stores a single optional instance
+// rather than a map/vector - see SceneParser::hasCamera below.
+class CameraDefinition
+{
+public:
+    CameraDefinition() {}
+
+    void setPosition(float x, float y, float z) { position = Vec3(x, y, z); }
+    void setRotation(float x, float y, float z, float w) { rotation = Quat(x, y, z, w); }
+    void setFov(float degrees) { fov = degrees; }
+    void setFocalLength(float mm) { focalLength = mm; }
+    void setSensorWidth(float mm) { sensorWidth = mm; }
+    void setSensorHeight(float mm) { sensorHeight = mm; }
+    void setFStop(float value) { fStop = value; }
+    void setShutterSpeed(float seconds) { shutterSpeed = seconds; }
+    void setIso(float value) { iso = value; }
+    void setAperture(float value) { aperture = value; }
+    void setFocalPoint(float value) { focalPoint = value; }
+
+    Camera toCamera() const
+    {
+        Camera cam;
+        cam.position = position;
+        cam.rotation = rotation;
+        cam.fov = DegToRad(fov);
+        cam.focalLength = focalLength;
+        cam.sensorWidth = sensorWidth;
+        cam.sensorHeight = sensorHeight;
+        cam.fStop = fStop;
+        cam.shutterSpeed = shutterSpeed;
+        cam.iso = iso;
+        cam.aperture = aperture;
+        cam.focalPoint = focalPoint;
+        return cam;
+    }
+
+private:
+    Vec3 position = Vec3(0.0f, 2.0f, 5.0f);
+    Quat rotation;
+    float fov = 45.0f; // degrees; converted to radians in toCamera()
+    float focalLength = 0.0f;
+    float sensorWidth = 36.0f;
+    float sensorHeight = 24.0f;
+    float fStop = 0.0f;
+    float shutterSpeed = 0.0f;
+    float iso = 100.0f;
+    float aperture = 0.0f;
+    float focalPoint = 1.0f;
+};
+
 // Primitive definition class
 class PrimitiveDefinition
 {
@@ -340,6 +392,7 @@ public:
         std::string currentSection;
         std::string currentMaterial;
         PrimitiveDefinition currentPrimitive;
+        CameraDefinition currentCamera;
         bool inBlock = false;
         bool waitingForBlockStart = false;
 
@@ -380,7 +433,16 @@ public:
                     primitives.push_back(currentPrimitive);
                     currentPrimitive = PrimitiveDefinition();
                 }
-                
+                else if (currentSection == "camera") {
+                    // A scene has at most one camera - a second `camera { }`
+                    // block silently overwrites the first, same "last one
+                    // wins" behavior as re-declaring an existing material.
+                    std::cout << "Debug: Setting scene camera" << std::endl;
+                    camera = currentCamera;
+                    hasCamera = true;
+                    currentCamera = CameraDefinition();
+                }
+
                 currentSection = "";
             } 
             else if (!inBlock && !waitingForBlockStart) {
@@ -399,32 +461,47 @@ public:
                     else if (parts[0] == "primitive") {
                         currentSection = "primitive";
                         std::cout << "Debug: Starting primitive section" << std::endl;
-                        
+
                         // Initialize new primitive
                         currentPrimitive = PrimitiveDefinition();
                         waitingForBlockStart = true;
                     }
+                    else if (parts[0] == "camera") {
+                        currentSection = "camera";
+                        std::cout << "Debug: Starting camera section" << std::endl;
+
+                        currentCamera = CameraDefinition();
+                        waitingForBlockStart = true;
+                    }
                 }
-            } 
+            }
             else if (inBlock) {
                 // Parse property within a section
                 std::vector<std::string> parts = split(line, ' ');
-                
+
                 if (currentSection == "material") {
                     parseMaterialProperty(currentMaterial, parts);
-                } 
+                }
                 else if (currentSection == "primitive") {
                     parsePrimitiveProperty(currentPrimitive, parts);
                 }
+                else if (currentSection == "camera") {
+                    parseCameraProperty(currentCamera, parts);
+                }
             }
         }
-        
+
         // If we're still in a block at the end of the file, handle it
         if (inBlock && currentSection == "primitive") {
             std::cout << "Debug: Adding final primitive to list" << std::endl;
             primitives.push_back(currentPrimitive);
         }
-        
+        else if (inBlock && currentSection == "camera") {
+            std::cout << "Debug: Setting final scene camera" << std::endl;
+            camera = currentCamera;
+            hasCamera = true;
+        }
+
         std::cout << "Debug: Parsing complete. Found " << materials.size() << " materials and " << primitives.size() << " primitives" << std::endl;
         
         return true;
@@ -443,7 +520,7 @@ public:
             try
             {
                 Primitive prim = primDef.toPrimitive(materials, scene, baseDir);
-                std::cout << "Debug: Adding primitive of type " << (prim.type == Type::eSphere ? "sphere" : "plane") << std::endl;
+                std::cout << "Debug: Adding primitive of type " << primDef.getType() << std::endl;
                 scene.AddPrimitive(prim);
             }
             catch (const std::exception &e)
@@ -454,6 +531,16 @@ public:
             {
                 std::cerr << "Unknown exception while adding primitive" << std::endl;
             }
+        }
+
+        // Add the parsed camera, if a `camera { }` block was present. If not,
+        // scene.camera stays null here - main() falls back to its own
+        // hardcoded default camera in that case, so scenes without a camera
+        // block behave exactly as before this feature existed.
+        if (hasCamera)
+        {
+            std::cout << "Debug: Adding parsed camera to scene" << std::endl;
+            scene.camera = std::make_unique<Camera>(camera.toCamera());
         }
 
         // Build the scene (BVH, etc.)
@@ -599,8 +686,56 @@ private:
         }
     }
 
+    void parseCameraProperty(CameraDefinition &cam, const std::vector<std::string> &parts) {
+        if (parts.empty()) return;
+
+        std::string property = parts[0];
+        std::cout << "Debug: Parsing camera property: " << property << std::endl;
+
+        try {
+            if (property == "position" && parts.size() >= 4) {
+                cam.setPosition(std::stof(parts[1]), std::stof(parts[2]), std::stof(parts[3]));
+            }
+            else if (property == "rotation" && parts.size() >= 5) {
+                cam.setRotation(std::stof(parts[1]), std::stof(parts[2]), std::stof(parts[3]), std::stof(parts[4]));
+            }
+            else if (property == "fov" && parts.size() >= 2) {
+                cam.setFov(std::stof(parts[1]));
+            }
+            else if (property == "focalLength" && parts.size() >= 2) {
+                cam.setFocalLength(std::stof(parts[1]));
+            }
+            else if (property == "sensorWidth" && parts.size() >= 2) {
+                cam.setSensorWidth(std::stof(parts[1]));
+            }
+            else if (property == "sensorHeight" && parts.size() >= 2) {
+                cam.setSensorHeight(std::stof(parts[1]));
+            }
+            else if (property == "fStop" && parts.size() >= 2) {
+                cam.setFStop(std::stof(parts[1]));
+            }
+            else if (property == "shutterSpeed" && parts.size() >= 2) {
+                cam.setShutterSpeed(std::stof(parts[1]));
+            }
+            else if (property == "iso" && parts.size() >= 2) {
+                cam.setIso(std::stof(parts[1]));
+            }
+            else if (property == "aperture" && parts.size() >= 2) {
+                cam.setAperture(std::stof(parts[1]));
+            }
+            else if (property == "focalPoint" && parts.size() >= 2) {
+                cam.setFocalPoint(std::stof(parts[1]));
+            }
+        }
+        catch (const std::exception& e) {
+            std::cerr << "Exception while parsing camera property: " << e.what() << std::endl;
+        }
+    }
+
     std::map<std::string, MaterialDefinition> materials;
     std::vector<PrimitiveDefinition> primitives;
+    CameraDefinition camera;
+    bool hasCamera = false;
     // The .tin file's own directory, set by parse() - albedoMap/roughnessMap/
     // metallicMap paths are resolved relative to this, not the process's
     // current working directory.
@@ -722,6 +857,13 @@ int main(int argc, char *argv[])
     options.filter = Filter(FilterType::eFilterGaussian, 1.0f, 2.0f);
     options.exposure = 1.0f;
     options.clamp = 10.0f;
+
+    // Compose the manual exposure multiplier above with any physically-
+    // derived one from the camera's fStop/shutterSpeed/iso (see
+    // Camera::ComputeExposureMultiplier) - this is 1.0 (no-op) unless the
+    // scene's camera block set all three, so this is a no-op for every
+    // scene that doesn't opt into physical exposure.
+    options.exposure *= scene.camera->ComputeExposureMultiplier();
     options.enableDOF = false;
 
     // Allocate memory for output image

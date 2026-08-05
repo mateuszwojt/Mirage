@@ -574,17 +574,18 @@ namespace Mirage
 
         GpuCamera BuildGpuCamera(const Camera &camera, const Options &options)
         {
+            float effectiveAperture = camera.EffectiveApertureDiameter();
             CameraSampler sampler(
                 Transform(camera.position, camera.rotation),
-                camera.fov, 0.001f, 1.0f,
-                camera.aperture, camera.focalPoint,
+                camera.EffectiveFov(), 0.001f, 1.0f,
+                effectiveAperture, camera.focalPoint,
                 options.enableDOF, options.width, options.height);
 
             GpuCamera gcam{};
             memcpy(gcam.rasterToWorld, sampler.rasterToWorld.cols, sizeof(gcam.rasterToWorld));
             Vec4 originCol = sampler.cameraToWorld.GetCol(3);
             gcam.originX = originCol.x; gcam.originY = originCol.y; gcam.originZ = originCol.z;
-            gcam.aperture = camera.aperture;
+            gcam.aperture = effectiveAperture;
             gcam.focalPoint = camera.focalPoint;
             gcam.enableDOF = options.enableDOF ? 1u : 0u;
             gcam.shutterStart = camera.shutterStart;
