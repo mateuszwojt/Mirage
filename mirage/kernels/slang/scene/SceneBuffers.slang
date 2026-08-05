@@ -18,8 +18,8 @@ struct GpuPrimitive
 {
     GpuTransform startTransform;
     GpuTransform endTransform;
-    float4 unionData; // sphere: x=radius; plane: xyzw=plane eq
-    int type;          // 0=sphere, 1=plane, 2=mesh
+    float4 unionData; // sphere: x=radius; plane: xyzw=plane eq; rect: x=width,y=height; disk: x=radius
+    int type;          // 0=sphere, 1=plane, 2=mesh, 3=rect, 4=disk
     int meshIndex;     // -1 if type != mesh
     int lightSamples;
     int materialIndex; // indexes g_Materials, one GpuMaterial per primitive
@@ -45,7 +45,24 @@ struct GpuMeshDescriptor
     uint hasTangents;
 };
 
+// Point/directional punctual lights (Tier-2) - mirrors lights/
+// PunctualLight.h's PunctualLight. Deliberately separate from GpuPrimitive
+// above (see that struct's comment) - iterated up to a caller-supplied
+// numLights count (FrameParams.slang's GpuFrameParams.numLights), same
+// explicit-count convention as g_Primitives/numScenePrims.
+struct GpuLight
+{
+    float3 position;   // ePoint only
+    float3 direction;  // eDirectional only
+    float3 color;
+    float intensity;
+    float radius;      // ePoint only - soft-shadow sample radius, 0 = true delta
+    float angle;       // eDirectional only - angular diameter, 0 = true delta
+    int type;          // 0=point, 1=directional
+};
+
 uniform StructuredBuffer<GpuPrimitive> g_Primitives;
+uniform StructuredBuffer<GpuLight> g_Lights;
 uniform StructuredBuffer<GpuMeshDescriptor> g_MeshDescriptors;
 uniform StructuredBuffer<BVHNode> g_SceneBVH;
 uniform StructuredBuffer<BVHNode> g_MeshBVHNodes;

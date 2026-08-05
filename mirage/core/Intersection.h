@@ -807,6 +807,20 @@ namespace Mirage
 		{
 			return p.mesh.area * p.endTransform.s;
 		}
+		case eRect:
+		{
+			// Unlike the mesh case above (which only scales its precomputed
+			// area by a single power of s, an existing approximation), width
+			// and height are exact local-space dimensions here, so both
+			// scale factors are applied for a correct area.
+			float s = p.endTransform.s;
+			return p.rect.width * p.rect.height * s * s;
+		}
+		case eDisk:
+		{
+			float s = p.endTransform.s;
+			return kPi * p.disk.radius * p.disk.radius * s * s;
+		}
 		};
 
 		return 0.0f;
@@ -870,6 +884,26 @@ namespace Mirage
 			normal = SafeNormalize(TransformVector(transform, u * n1 + v * n2 + (1.0f - u - v) * n3));
 			return;
 		}
+		case eRect:
+		{
+			float u1, u2;
+			Sample2D(rand, u1, u2);
+
+			::Mirage::Vec3 localPos((u1 - 0.5f) * p.rect.width, (u2 - 0.5f) * p.rect.height, 0.0f);
+			pos = TransformPoint(transform, localPos);
+			normal = Normalize(transform.r * ::Mirage::Vec3(0.0f, 0.0f, 1.0f));
+			return;
+		}
+		case eDisk:
+		{
+			float u1, u2;
+			Sample2D(rand, u1, u2);
+
+			::Mirage::Vec2 disc = UniformSampleDisc(u1, u2) * p.disk.radius;
+			pos = TransformPoint(transform, ::Mirage::Vec3(disc.x, disc.y, 0.0f));
+			normal = Normalize(transform.r * ::Mirage::Vec3(0.0f, 0.0f, 1.0f));
+			return;
+		}
 		}
 	}
 
@@ -910,6 +944,21 @@ namespace Mirage
 					localBounds.upper = Vec3(0.0f);
 				}
 			}
+			break;
+		}
+		case eRect:
+		{
+			// Small nonzero z half-extent - the rect is a flat local-z=0
+			// shape, and a strictly-zero-volume AABB is a robustness hazard
+			// for BVH traversal (degenerate slab tests).
+			localBounds.lower = ::Mirage::Vec3(-p.rect.width * 0.5f, -p.rect.height * 0.5f, -1.e-4f);
+			localBounds.upper = ::Mirage::Vec3(p.rect.width * 0.5f, p.rect.height * 0.5f, 1.e-4f);
+			break;
+		}
+		case eDisk:
+		{
+			localBounds.lower = ::Mirage::Vec3(-p.disk.radius, -p.disk.radius, -1.e-4f);
+			localBounds.upper = ::Mirage::Vec3(p.disk.radius, p.disk.radius, 1.e-4f);
 			break;
 		}
 		};
@@ -1030,6 +1079,49 @@ namespace Mirage
 					::Mirage::Vec3 smoothTangent = u * t1 + v * t2 + w * t3;
 					*outTangent = SafeNormalize(TransformVector(transform, smoothTangent));
 				}
+			}
+
+			return hit;
+		}
+		case eRect:
+		case eDisk:
+		{
+			// Both shapes live in the primitive's local z=0 plane - transform
+			// the ray into local space (same InverseTransformPoint/Vector
+			// pair the mesh case above uses), solve for the local-plane
+			// intersection, and use the local t directly as outT: since
+			// InverseTransformVector scales direction by 1/s, the s cancels
+			// out algebraically and local t == world t (see the mesh case's
+			// identical reasoning - ray.origin + t_local * ray.dir is exactly
+			// the world-space hit point).
+			::Mirage::Vec3 localOrigin = InverseTransformPoint(transform, ray.origin);
+			::Mirage::Vec3 localDir = InverseTransformVector(transform, ray.dir);
+
+			if (localDir.z == 0.0f)
+				return false;
+
+			float t = -localOrigin.z / localDir.z;
+			if (t <= 0.0f)
+				return false;
+
+			::Mirage::Vec3 localHit = localOrigin + localDir * t;
+
+			bool hit;
+			if (p.type == eRect)
+			{
+				hit = (::Mirage::Abs(localHit.x) <= p.rect.width * 0.5f) &&
+					  (::Mirage::Abs(localHit.y) <= p.rect.height * 0.5f);
+			}
+			else
+			{
+				hit = (localHit.x * localHit.x + localHit.y * localHit.y) <= (p.disk.radius * p.disk.radius);
+			}
+
+			if (hit)
+			{
+				outT = t;
+				if (outNormal)
+					*outNormal = Normalize(transform.r * ::Mirage::Vec3(0.0f, 0.0f, 1.0f));
 			}
 
 			return hit;

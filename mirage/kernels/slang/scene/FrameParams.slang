@@ -15,4 +15,5 @@ struct GpuFrameParams
     uint frameSeed;
     uint sampleIndex;
     float clampValue;
+    uint numLights; // Tier-2 "punctual lights" - appended, not interleaved
 };

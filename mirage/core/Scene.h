@@ -14,6 +14,7 @@
 #include "mirage/shaders/Texture.h"
 #include "mirage/shaders/Material.h"
 #include "mirage/utils/MathUtils.h"
+#include "mirage/lights/PunctualLight.h"
 
 #include "mirage/core/BVH.h"
 #include "mirage/core/Probe.h"
@@ -70,6 +71,12 @@ namespace Mirage
 		// by the time Build() constructs the scene BVH, every instance is
 		// already a plain Primitive like any other.
 		std::vector<PointInstancer> instancers;
+
+		// Point/directional punctual lights - deliberately not Primitives
+		// (no area, no intersection geometry, never camera-visible or
+		// BSDF-hittable) - see PunctualLight.h and SampleLights' dedicated
+		// no-MIS NEE block for these.
+		std::vector<PunctualLight> lights;
 
 		// Meshes
 		std::vector<std::unique_ptr<Mesh>> meshes;

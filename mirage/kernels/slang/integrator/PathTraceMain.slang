@@ -54,7 +54,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     float outDepth;
     float3 outNormal;
     int outPrimId;
-    float3 sample = PathTrace(origin, dir, time, frame.maxDepth, frame.numPrimitives, rand,
+    float3 sample = PathTrace(origin, dir, time, frame.maxDepth, frame.numPrimitives, frame.numLights, rand,
                                outDepth, outNormal, outPrimId);
 
     AddSample(pixelIndex, frame.clampValue, sample);

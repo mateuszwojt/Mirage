@@ -65,6 +65,19 @@ namespace Mirage
             g.normalTextureIndex = m.normalTextureIndex;
             return g;
         }
+
+        GpuLight ConvertLight(const PunctualLight &l)
+        {
+            GpuLight g{};
+            g.posX = l.position.x; g.posY = l.position.y; g.posZ = l.position.z;
+            g.dirX = l.direction.x; g.dirY = l.direction.y; g.dirZ = l.direction.z;
+            g.colorX = l.color.x; g.colorY = l.color.y; g.colorZ = l.color.z;
+            g.intensity = l.intensity;
+            g.radius = l.radius;
+            g.angle = l.angle;
+            g.type = (int32_t)l.type;
+            return g;
+        }
     }
 
     struct VulkanRenderer::Impl
@@ -108,7 +121,12 @@ namespace Mirage
         // data, same as every other CreateStructuredBuffer call below.
         ComPtr<IBuffer> tangentsBuf;
         ComPtr<IBuffer> materialsBuf, skyBuf;
+        // Point/directional punctual lights (Tier-2) - padded to one dummy
+        // (never-indexed, since numLightsUploaded stays 0) element when the
+        // scene has no lights, same convention as positionsEndBuf/tangentsBuf.
+        ComPtr<IBuffer> lightsBuf;
         uint32_t numPrimitivesUploaded = 0;
+        uint32_t numLightsUploaded = 0;
 
         // Per-material textures (albedo/roughness/metallic maps, M8) - fixed-
         // size array of kMaxMaterialTextures slots (Material.slang/
@@ -535,12 +553,29 @@ namespace Mirage
                         }
                     }
                     break;
+                case eRect:
+                    gp.unionDataX = prim.rect.width;
+                    gp.unionDataY = prim.rect.height;
+                    gp.unionDataZ = gp.unionDataW = 0.0f;
+                    break;
+                case eDisk:
+                    gp.unionDataX = prim.disk.radius;
+                    gp.unionDataY = gp.unionDataZ = gp.unionDataW = 0.0f;
+                    break;
                 }
                 primitives.push_back(gp);
             }
 
             UploadProbe();
             UploadMaterialTextures();
+
+            std::vector<GpuLight> lights;
+            lights.reserve(scene->lights.size());
+            for (const PunctualLight &light : scene->lights)
+                lights.push_back(ConvertLight(light));
+            numLightsUploaded = (uint32_t)lights.size();
+            if (lights.empty())
+                lights.push_back(GpuLight{}); // dummy - never indexed, numLightsUploaded stays 0
 
             GpuSky gsky{};
             gsky.horizonX = scene->sky.horizon.x; gsky.horizonY = scene->sky.horizon.y; gsky.horizonZ = scene->sky.horizon.z;
@@ -567,6 +602,7 @@ namespace Mirage
             uvsBuf = CreateStructuredBuffer(uvs);
             materialsBuf = CreateStructuredBuffer(materials);
             skyBuf = CreateStructuredBuffer(skyData);
+            lightsBuf = CreateStructuredBuffer(lights);
 
             numPrimitivesUploaded = (uint32_t)primitives.size();
             sceneUploaded = true;
@@ -720,6 +756,7 @@ namespace Mirage
             frame.frameSeed = accumulatedSamples * 9781u + 1u;
             frame.sampleIndex = accumulatedSamples;
             frame.clampValue = options.clamp;
+            frame.numLights = numLightsUploaded;
 
             std::vector<GpuCamera> camData{gcam};
             std::vector<GpuFrameParams> frameData{frame};
@@ -748,6 +785,7 @@ namespace Mirage
                 cursor["g_Materials"].setBinding(materialsBuf);
                 BindMaterialTextures(cursor);
                 cursor["g_Sky"].setBinding(skyBuf);
+                cursor["g_Lights"].setBinding(lightsBuf);
                 cursor["g_ProbeTexture"].setBinding(Binding(probeTexture, probeSampler));
                 cursor["g_ProbeData"].setBinding(probeDataBuf);
                 cursor["g_ProbeCdfX"].setBinding(probeCdfXBuf);
@@ -882,6 +920,7 @@ namespace Mirage
                 cursor["g_Materials"].setBinding(materialsBuf);
                 BindMaterialTextures(cursor);
                 cursor["g_Sky"].setBinding(skyBuf);
+                cursor["g_Lights"].setBinding(lightsBuf);
                 cursor["g_ProbeTexture"].setBinding(Binding(probeTexture, probeSampler));
                 cursor["g_ProbeData"].setBinding(probeDataBuf);
                 cursor["g_ProbeCdfX"].setBinding(probeCdfXBuf);

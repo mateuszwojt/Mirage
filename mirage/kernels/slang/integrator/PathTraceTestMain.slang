@@ -16,6 +16,7 @@ struct PathTraceTestCase
     int maxDepth;
     uint seed;
     uint numPrimitives;
+    uint numLights; // Tier-2 "punctual lights" - 0 for every pre-existing test case
 };
 
 struct PathTraceTestResult
@@ -48,7 +49,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     int unusedPrimId;
 
     PathTraceTestResult result;
-    result.radiance = PathTrace(tc.origin, tc.dir, tc.time, tc.maxDepth, tc.numPrimitives, rand,
+    result.radiance = PathTrace(tc.origin, tc.dir, tc.time, tc.maxDepth, tc.numPrimitives, tc.numLights, rand,
                                  unusedDepth, unusedNormal, unusedPrimId);
 
     g_Results[i] = result;

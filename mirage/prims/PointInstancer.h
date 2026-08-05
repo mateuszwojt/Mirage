@@ -32,6 +32,9 @@ namespace Mirage
         float sphereRadius = 1.0f;
         float plane[4] = {0.0f, 1.0f, 0.0f, 0.0f};
         int32_t meshIndex = -1; // index into Scene::meshes - type == eMesh only
+        float rectWidth = 1.0f;
+        float rectHeight = 1.0f;
+        float diskRadius = 1.0f;
 
         int32_t materialIndex = -1;
         int lightSamples = 0;
